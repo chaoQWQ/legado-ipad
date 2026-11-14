@@ -42,14 +42,16 @@ jobs:
             -destination "id=$device_id" -derivedDataPath DerivedData \
             CODE_SIGNING_ALLOWED=NO build
           xcrun simctl bootstatus "$device_id" -b
-          xcrun simctl status_bar "$device_id" override --time "9:41" --dataNetwork wifi --wifiMode active --wifiBars 3 --batteryState unplugged --batteryLevel 100
-          xcrun simctl install "$device_id" DerivedData/Build/Products/Debug-iphonesimulator/LegadoPad.app
+          app_path=DerivedData/Build/Products/Debug-iphonesimulator/LegadoPad.app
+          xcrun simctl install "$device_id" "$app_path"
           xcrun simctl launch "$device_id" io.legado.ipad
+          sleep 2
           xcrun simctl io "$device_id" screenshot DerivedData/LegadoPad.png
+          ditto -c -k --keepParent "$app_path" DerivedData/LegadoPad-simulator.zip
       - uses: actions/upload-artifact@v4
         with:
           name: LegadoPad-iPad-simulator
           path: |
             ipad/DerivedData/LegadoPad.png
-            ipad/DerivedData/Build/Products/Debug-iphonesimulator/LegadoPad.app
+            ipad/DerivedData/LegadoPad-simulator.zip
           if-no-files-found: error

@@ -10,8 +10,10 @@
 cd ipad
 swift test
 xcodebuild -project LegadoPad.xcodeproj -scheme LegadoPad \
-  -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
+  -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5)' CODE_SIGNING_ALLOWED=NO build
 ```
+
+命令里的机型可替换为本机已安装的 iPad 模拟器。仓库的 [iPad 构建记录](https://github.com/chaoQWQ/legado-ipad/actions/workflows/ipad.yml) 提供启动截图和模拟器应用压缩包。
 
 ## 导入与阅读
 
