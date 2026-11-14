@@ -10,6 +10,7 @@ struct SearchView: View {
     @State private var failures: [SearchFailure] = []
     @State private var finishedSources = 0
     @State private var selection: SourceBook?
+    @State private var bookToOpen: LibraryBook?
     @FocusState private var searchFocused: Bool
 
     let showSources: () -> Void
@@ -46,9 +47,9 @@ struct SearchView: View {
         .task(id: request?.id) {
             if let request { await runSearch(request) }
         }
-        .sheet(item: $selection) { book in
+        .sheet(item: $selection, onDismiss: openSelectedBook) { book in
             if let source = library.sources.first(where: { $0.id == book.sourceID }) {
-                OnlineBookView(result: book, source: source, openBook: openBook)
+                OnlineBookView(result: book, source: source) { bookToOpen = $0 }
             }
         }
     }
@@ -144,6 +145,12 @@ struct SearchView: View {
         failures = []
         finishedSources = 0
         request = SearchRequest(keyword: keyword, sources: sources)
+    }
+
+    private func openSelectedBook() {
+        guard let bookToOpen else { return }
+        self.bookToOpen = nil
+        openBook(bookToOpen)
     }
 
     private func runSearch(_ request: SearchRequest) async {
@@ -327,7 +334,7 @@ private struct OnlineBookView: View {
     }
 
     private func show(_ book: LibraryBook) {
-        dismiss()
         openBook(book)
+        dismiss()
     }
 }

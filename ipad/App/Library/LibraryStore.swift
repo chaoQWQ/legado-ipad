@@ -49,7 +49,7 @@ final class LibraryStore: ObservableObject {
             do {
                 let data = try Data(contentsOf: catalogURL)
                 catalog = try JSONDecoder().decode(Catalog.self, from: data)
-            } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            } catch where isMissingFile(error) {
                 catalog = Catalog()
             }
         } catch {
@@ -225,7 +225,7 @@ private actor LibraryFiles {
     func readChapter(in id: UUID, at index: Int) throws -> String? {
         do {
             return try String(contentsOf: chapterURL(in: id, at: index), encoding: .utf8)
-        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+        } catch where isMissingFile(error) {
             return nil
         }
     }
@@ -246,6 +246,11 @@ private actor LibraryFiles {
     private func chapterURL(in id: UUID, at index: Int) -> URL {
         directory(for: id).appending(path: "\(index).txt")
     }
+}
+
+private func isMissingFile(_ error: Error) -> Bool {
+    let error = error as NSError
+    return error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError
 }
 
 enum LibraryError: LocalizedError {
