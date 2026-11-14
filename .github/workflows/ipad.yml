@@ -1,0 +1,55 @@
+name: iPad
+
+on:
+  push:
+    branches: [ipad-native]
+    paths: ['ipad/**', '.github/workflows/ipad.yml']
+  pull_request:
+    paths: ['ipad/**', '.github/workflows/ipad.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  simulator:
+    runs-on: macos-26
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ipad
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test reader and source parsers
+        run: swift test
+      - name: Build and launch on an iPad simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          device_id="$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          runtimes = json.load(sys.stdin)["devices"]
+          ios = sorted(
+              (key for key in runtimes if key.startswith("com.apple.CoreSimulator.SimRuntime.iOS-")),
+              key=lambda key: tuple(map(int, key.split("iOS-")[1].split("-"))),
+              reverse=True,
+          )
+          print(next(device["udid"] for key in ios for device in runtimes[key]
+                     if device["name"].startswith("iPad") and device["isAvailable"]))
+          ')"
+          xcrun simctl boot "$device_id"
+          xcodebuild -project LegadoPad.xcodeproj -scheme LegadoPad \
+            -destination "id=$device_id" -derivedDataPath DerivedData \
+            CODE_SIGNING_ALLOWED=NO build
+          xcrun simctl bootstatus "$device_id" -b
+          xcrun simctl status_bar "$device_id" override --time "9:41" --dataNetwork wifi --wifiMode active --wifiBars 3 --batteryState unplugged --batteryLevel 100
+          xcrun simctl install "$device_id" DerivedData/Build/Products/Debug-iphonesimulator/LegadoPad.app
+          xcrun simctl launch "$device_id" io.legado.ipad
+          xcrun simctl io "$device_id" screenshot DerivedData/LegadoPad.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LegadoPad-iPad-simulator
+          path: |
+            ipad/DerivedData/LegadoPad.png
+            ipad/DerivedData/Build/Products/Debug-iphonesimulator/LegadoPad.app
+          if-no-files-found: error

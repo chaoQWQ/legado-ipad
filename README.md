@@ -1,6 +1,6 @@
 # 阅读 Archive
 
-[中文](README.md) · [English](English.md)
+[中文](README.md) · [English](English.md) · [iPad 版](ipad/README.md)
 
 <p align="center"><img width="125" height="125" src="docs/archive_icon.svg" alt="阅读 Archive"></p>
 

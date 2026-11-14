@@ -1,0 +1,210 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		100000000000000000000001 /* LocalBooks in Frameworks */ = {isa = PBXBuildFile; productRef = 100000000000000000000021 /* LocalBooks */; };
+		100000000000000000000002 /* BookSources in Frameworks */ = {isa = PBXBuildFile; productRef = 100000000000000000000022 /* BookSources */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		100000000000000000000003 /* LegadoPad.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LegadoPad.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		100000000000000000000004 /* App */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = App;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		100000000000000000000005 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				100000000000000000000001 /* LocalBooks in Frameworks */,
+				100000000000000000000002 /* BookSources in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		100000000000000000000006 = {
+			isa = PBXGroup;
+			children = (
+				100000000000000000000004 /* App */,
+				100000000000000000000023 /* LegadoPad.xcconfig */,
+				100000000000000000000007 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		100000000000000000000007 /* Products */ = {
+			isa = PBXGroup;
+			children = (100000000000000000000003 /* LegadoPad.app */);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		100000000000000000000008 /* LegadoPad */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 100000000000000000000015 /* Build configuration list for PBXNativeTarget "LegadoPad" */;
+			buildPhases = (
+				100000000000000000000009 /* Sources */,
+				100000000000000000000005 /* Frameworks */,
+				100000000000000000000010 /* Resources */,
+			);
+			buildRules = ();
+			dependencies = ();
+			fileSystemSynchronizedGroups = (100000000000000000000004 /* App */);
+			name = LegadoPad;
+			packageProductDependencies = (
+				100000000000000000000021 /* LocalBooks */,
+				100000000000000000000022 /* BookSources */,
+			);
+			productName = LegadoPad;
+			productReference = 100000000000000000000003 /* LegadoPad.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		100000000000000000000011 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2600;
+				LastUpgradeCheck = 2600;
+				TargetAttributes = {
+					100000000000000000000008 = {CreatedOnToolsVersion = 26.0; };
+				};
+			};
+			buildConfigurationList = 100000000000000000000014 /* Build configuration list for PBXProject "LegadoPad" */;
+			developmentRegion = "zh-Hans";
+			hasScannedForEncodings = 0;
+			knownRegions = ("zh-Hans", en, Base);
+			mainGroup = 100000000000000000000006;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (100000000000000000000020 /* Local package */);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 100000000000000000000007 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (100000000000000000000008 /* LegadoPad */);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		100000000000000000000010 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		100000000000000000000009 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		100000000000000000000016 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		100000000000000000000017 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		100000000000000000000018 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 100000000000000000000023 /* LegadoPad.xcconfig */;
+			buildSettings = {};
+			name = Debug;
+		};
+		100000000000000000000019 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 100000000000000000000023 /* LegadoPad.xcconfig */;
+			buildSettings = {};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		100000000000000000000014 /* Build configuration list for PBXProject "LegadoPad" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				100000000000000000000016 /* Debug */,
+				100000000000000000000017 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		100000000000000000000015 /* Build configuration list for PBXNativeTarget "LegadoPad" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				100000000000000000000018 /* Debug */,
+				100000000000000000000019 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		100000000000000000000020 /* Local package */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = .;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		100000000000000000000021 /* LocalBooks */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 100000000000000000000020 /* Local package */;
+			productName = LocalBooks;
+		};
+		100000000000000000000022 /* BookSources */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 100000000000000000000020 /* Local package */;
+			productName = BookSources;
+		};
+/* End XCSwiftPackageProductDependency section */
+		100000000000000000000023 /* LegadoPad.xcconfig */ = {
+			isa = PBXFileReference;
+			lastKnownFileType = text.xcconfig;
+			path = LegadoPad.xcconfig;
+			sourceTree = "<group>";
+		};
+	};
+	rootObject = 100000000000000000000011 /* Project object */;
+}
