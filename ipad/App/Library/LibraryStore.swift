@@ -54,7 +54,6 @@ final class LibraryStore: ObservableObject {
     let client: BookSourceClient
     var books: [LibraryBook] { catalog.books }
     var sources: [BookSource] { catalog.sources }
-    var bookStorageDirectory: URL { files.root }
     var sourceSubscriptions: [BookSourceSubscription] { catalog.sourceSubscriptions ?? [] }
     var subscriptionsWithUpdates: Set<UUID> { catalog.pendingSubscriptionUpdates ?? [] }
     var feeds: [FeedSubscription] { catalog.feeds ?? [] }
@@ -222,27 +221,82 @@ final class LibraryStore: ObservableObject {
 
     func chapter(in book: LibraryBook, at index: Int) async throws -> String {
         if let stored = try await cachedChapter(in: book, at: index) { return stored }
+        let cacheGeneration = await files.cacheGeneration(for: book.id)
         let text = try await fetchChapter(in: book, at: index, bypassCache: false)
         try Task.checkCancellation()
         try verifyCurrent(book)
-        try? await files.writeChapter(text, in: book, at: index, replaces: false)
+        _ = try? await files.writeChapter(text, in: book, at: index, replaces: false,
+                                          expectedCacheGeneration: cacheGeneration)
         return chapterTextForReading(text, in: book)
     }
 
     func refreshChapter(in book: LibraryBook, at index: Int) async throws -> String {
+        let cacheGeneration = await files.cacheGeneration(for: book.id)
         let text = try await fetchChapter(in: book, at: index, bypassCache: true)
         try Task.checkCancellation()
         try verifyCurrent(book)
-        try await files.writeChapter(text, in: book, at: index, replaces: true)
+        try await files.writeChapter(text, in: book, at: index, replaces: true, expectedCacheGeneration: cacheGeneration)
         return chapterTextForReading(text, in: book)
     }
 
     func downloadChapter(in book: LibraryBook, at index: Int) async throws {
         if try await readCachedChapter(in: book, at: index) != nil { return }
+        let cacheGeneration = await files.cacheGeneration(for: book.id)
         let text = try await fetchChapter(in: book, at: index, bypassCache: false)
         try Task.checkCancellation()
         try verifyCurrent(book)
-        try await files.writeChapter(text, in: book, at: index, replaces: false)
+        guard try await files.writeChapter(text, in: book, at: index, replaces: false,
+                                            expectedCacheGeneration: cacheGeneration) else {
+            throw LibraryError.cacheWasCleared
+        }
+    }
+
+    func storageSnapshot() async throws -> LibraryStorageSnapshot {
+        let currentBooks = books
+        let appRoot = catalogURL.deletingLastPathComponent()
+        let auxiliaryMeasurement = Task.detached(priority: .utility) {
+            try LibraryAuxiliaryStorage.scan(appRoot: appRoot)
+        }
+        return try await withTaskCancellationHandler {
+            defer { auxiliaryMeasurement.cancel() }
+            var measured: [LibraryStorageBook] = []
+            for book in currentBooks {
+                try Task.checkCancellation()
+                let usage = try await files.chapterStorage(for: book)
+                let chapters = usage.chapterBytes.keys.sorted().compactMap { index -> LibraryStorageChapter? in
+                    guard book.chapters.indices.contains(index), let bytes = usage.chapterBytes[index] else { return nil }
+                    let title = displayTitle(book.chapters[index].title, sourceID: book.sourceID)
+                    return LibraryStorageChapter(index: index, title: title, bytes: bytes)
+                }
+                measured.append(LibraryStorageBook(
+                    id: book.id, revision: book.readingRevision, title: displayTitle(book.title, sourceID: book.sourceID),
+                    author: book.author, coverURL: book.coverURL, sourceName: book.sourceID == nil ? nil : sourceName(for: book),
+                    isOnline: book.sourceID != nil, totalChapters: book.chapters.count, usage: usage, chapters: chapters
+                ))
+            }
+            let auxiliary = try await auxiliaryMeasurement.value
+            return LibraryStorageSnapshot(books: measured, galleryBytes: auxiliary.galleryBytes,
+                                          workspaceBytes: auxiliary.workspaceBytes, configurationBytes: auxiliary.configurationBytes)
+        } onCancel: {
+            auxiliaryMeasurement.cancel()
+        }
+    }
+
+    func removeChapterCache(bookID: UUID, revision: UUID?, indices: Set<Int>? = nil) async throws -> LibraryCacheRemoval {
+        guard let book = currentBook(bookID), book.readingRevision == revision, book.sourceID != nil else {
+            throw LibraryError.bookUnavailable
+        }
+        return try await files.clearChapterCache(in: book, indices: indices)
+    }
+
+    func removeChapterCaches(in items: [LibraryStorageBook]) async throws -> LibraryCacheRemoval {
+        let onlineBooks = try items.filter(\.isOnline).map { item in
+            guard let book = currentBook(item.id), book.readingRevision == item.revision, book.sourceID != nil else {
+                throw LibraryError.bookUnavailable
+            }
+            return book
+        }
+        return try await files.clearChapterCaches(in: onlineBooks)
     }
 
     func switchSource(for book: LibraryBook, to result: SourceBook, at index: Int) async throws -> LibraryBook {
@@ -252,6 +306,7 @@ final class LibraryStore: ObservableObject {
               source.id != book.sourceID else { throw LibraryError.missingSource }
         if existingBook(result) != nil { throw LibraryError.editionAlreadyOnShelf }
 
+        let cacheGeneration = await files.cacheGeneration(for: book.id)
         let details = try await client.details(for: result, in: source)
         let chapters = try await client.chapters(for: details, in: source)
         guard !chapters.isEmpty else { throw LibraryError.noChapters }
@@ -277,9 +332,9 @@ final class LibraryStore: ObservableObject {
             let text = try await client.content(of: chapters[target], in: source, applyingTextConversion: false)
             try Task.checkCancellation()
             try verifyCurrent(book)
-            try await files.writeChapter(text, in: replacement, at: target, replaces: false)
+            try await files.writeChapter(text, in: replacement, at: target, replaces: false, expectedCacheGeneration: cacheGeneration)
         }
-        try await files.migrateIndexedCache(for: book)
+        try await files.migrateIndexedCache(for: book, expectedCacheGeneration: cacheGeneration)
         try Task.checkCancellation()
         try verifyCurrent(book)
         guard sources.contains(where: { $0.id == source.id && $0.isEnabled }) else { throw LibraryError.missingSource }
@@ -526,9 +581,26 @@ final class LibraryStore: ObservableObject {
     }
 }
 
+struct LibraryBookStorage: Sendable {
+    var chapterBytes: [Int: Int64] = [:]
+    var totalBytes: Int64 = 0
+    var totalFileCount = 0
+    var archivedBytes: Int64 = 0
+    var archivedFileCount = 0
+    var latestModification: Date?
+}
+
+struct LibraryCacheRemoval: Sendable {
+    var bytes: Int64 = 0
+    var fileCount = 0
+}
+
 private actor LibraryFiles {
+    private static let initialCacheGeneration = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+
     let root: URL
     private var removedBooks = Set<UUID>()
+    private var cacheGenerations: [UUID: UUID] = [:]
 
     init(root: URL) {
         self.root = root.appending(path: "Books", directoryHint: .isDirectory)
@@ -576,16 +648,26 @@ private actor LibraryFiles {
         }
     }
 
-    func writeChapter(_ text: String, in book: LibraryBook, at index: Int, replaces: Bool) throws {
-        try Task.checkCancellation()
-        guard !removedBooks.contains(book.id) else { throw LibraryError.bookUnavailable }
-        let url = onlineChapterURL(in: book, at: index) ?? chapterURL(in: book.id, at: index)
-        if !replaces, FileManager.default.fileExists(atPath: url.path) { return }
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try text.write(to: url, atomically: true, encoding: .utf8)
+    func cacheGeneration(for bookID: UUID) -> UUID {
+        cacheGenerations[bookID] ?? Self.initialCacheGeneration
     }
 
-    func migrateIndexedCache(for book: LibraryBook) throws {
+    @discardableResult
+    func writeChapter(
+        _ text: String, in book: LibraryBook, at index: Int, replaces: Bool, expectedCacheGeneration: UUID? = nil
+    ) throws -> Bool {
+        try Task.checkCancellation()
+        guard !removedBooks.contains(book.id) else { throw LibraryError.bookUnavailable }
+        if let expectedCacheGeneration, expectedCacheGeneration != cacheGeneration(for: book.id) { return false }
+        let url = onlineChapterURL(in: book, at: index) ?? chapterURL(in: book.id, at: index)
+        if !replaces, FileManager.default.fileExists(atPath: url.path) { return true }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        return true
+    }
+
+    func migrateIndexedCache(for book: LibraryBook, expectedCacheGeneration: UUID? = nil) throws {
+        if let expectedCacheGeneration, expectedCacheGeneration != cacheGeneration(for: book.id) { return }
         guard book.indexedOnlineCache != false else { return }
         for index in book.chapters.indices {
             try Task.checkCancellation()
@@ -600,6 +682,7 @@ private actor LibraryFiles {
 
     func removeBook(_ id: UUID) {
         removedBooks.insert(id)
+        cacheGenerations.removeValue(forKey: id)
         try? FileManager.default.removeItem(at: directory(for: id))
     }
 
@@ -608,14 +691,191 @@ private actor LibraryFiles {
     }
 
     private func chapterURL(in id: UUID, at index: Int) -> URL {
-        directory(for: id).appending(path: "\(index).txt")
+        directory(for: id).appending(path: indexedChapterName(index))
     }
 
     private func onlineChapterURL(in book: LibraryBook, at index: Int) -> URL? {
         guard let edition = book.onlineID, let chapter = book.chapters[index].online else { return nil }
-        return directory(for: book.id)
-            .appending(path: "edition-\(libraryDigest(edition))", directoryHint: .isDirectory)
-            .appending(path: "\(libraryDigest(chapter.id)).txt")
+        return editionFolder(in: book.id, edition: edition)
+            .appending(path: scopedChapterName(chapter))
+    }
+
+    private func editionFolder(in id: UUID, edition: String) -> URL {
+        directory(for: id).appending(path: editionFolderName(edition), directoryHint: .isDirectory)
+    }
+
+    private func indexedChapterName(_ index: Int) -> String { "\(index).txt" }
+    private func scopedChapterName(_ chapter: SourceChapter) -> String { "\(libraryDigest(chapter.id)).txt" }
+    private func editionFolderName(_ edition: String) -> String { "edition-\(libraryDigest(edition))" }
+}
+
+extension LibraryFiles {
+    private struct ChapterFile {
+        let url: URL
+        let relativePath: String
+        let bytes: Int64
+        let modified: Date?
+    }
+
+    private static let chapterFileKeys: Set<URLResourceKey> = [
+        .isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey
+    ]
+
+    func chapterStorage(for book: LibraryBook) throws -> LibraryBookStorage {
+        guard !removedBooks.contains(book.id) else { throw LibraryError.bookUnavailable }
+        let inventory = try chapterFiles(for: book)
+        guard !inventory.isEmpty else { return LibraryBookStorage() }
+        let filesByPath = Dictionary(uniqueKeysWithValues: inventory.map { ($0.relativePath, $0) })
+        var currentPaths = Set<String>()
+        var usage = LibraryBookStorage()
+        let currentEdition = book.onlineID.map(editionFolderName)
+        let hasCurrentEditionFiles = currentEdition.map { edition in
+            filesByPath.keys.contains { $0.hasPrefix(edition + "/") }
+        } ?? false
+        for index in book.chapters.indices {
+            try Task.checkCancellation()
+            let candidates = chapterStoragePaths(
+                in: book, at: index, currentEdition: currentEdition, includesScopedFile: hasCurrentEditionFiles
+            )
+            for path in candidates {
+                if let file = filesByPath[path] {
+                    usage.chapterBytes[index, default: 0] += file.bytes
+                    currentPaths.insert(path)
+                }
+            }
+        }
+        usage.totalFileCount = inventory.count
+        for file in inventory {
+            usage.totalBytes += file.bytes
+            if !currentPaths.contains(file.relativePath) {
+                usage.archivedBytes += file.bytes
+                usage.archivedFileCount += 1
+            }
+            if let modified = file.modified, usage.latestModification.map({ $0 < modified }) ?? true {
+                usage.latestModification = modified
+            }
+        }
+        return usage
+    }
+
+    func clearChapterCache(in book: LibraryBook, indices: Set<Int>? = nil) throws -> LibraryCacheRemoval {
+        guard !removedBooks.contains(book.id) else { throw LibraryError.bookUnavailable }
+        guard book.onlineID != nil, book.sourceID != nil else { return LibraryCacheRemoval() }
+        if let indices {
+            guard !indices.isEmpty else { return LibraryCacheRemoval() }
+            guard indices.allSatisfy(book.chapters.indices.contains) else { throw LibraryError.noChapters }
+        }
+        try Task.checkCancellation()
+        let inventory = try chapterFiles(for: book)
+        let targets: [ChapterFile]
+        if let indices {
+            let currentEdition = book.onlineID.map(editionFolderName)
+            let paths = Set(indices.flatMap { chapterStoragePaths(in: book, at: $0, currentEdition: currentEdition) })
+            targets = inventory.filter { paths.contains($0.relativePath) }
+        } else {
+            targets = inventory
+        }
+        try Task.checkCancellation()
+        cacheGenerations[book.id] = UUID()
+
+        var result = LibraryCacheRemoval()
+        for file in targets {
+            do {
+                try FileManager.default.removeItem(at: file.url)
+                result.bytes += file.bytes
+                result.fileCount += 1
+            } catch where missingChapterFile(error) {
+                continue
+            }
+        }
+        return result
+    }
+
+    func clearChapterCaches(in books: [LibraryBook]) throws -> LibraryCacheRemoval {
+        var result = LibraryCacheRemoval()
+        for book in books where !removedBooks.contains(book.id) {
+            let removed = try clearChapterCache(in: book)
+            result.bytes += removed.bytes
+            result.fileCount += removed.fileCount
+        }
+        return result
+    }
+
+    private func chapterStoragePaths(
+        in book: LibraryBook, at index: Int, currentEdition: String?, includesScopedFile: Bool = true
+    ) -> [String] {
+        let indexed = indexedChapterName(index)
+        guard let currentEdition, let chapter = book.chapters[index].online else { return [indexed] }
+        var paths = includesScopedFile ? ["\(currentEdition)/\(scopedChapterName(chapter))"] : []
+        if book.indexedOnlineCache != false { paths.append(indexed) }
+        return paths
+    }
+
+    private func chapterFiles(for book: LibraryBook) throws -> [ChapterFile] {
+        guard try isChapterFolder(root) else { return [] }
+        let bookFolder = directory(for: book.id)
+        let includesEditions = book.onlineID != nil
+        var inventory: [ChapterFile] = []
+        for child in try chapterFolderContents(bookFolder) {
+            try Task.checkCancellation()
+            let name = child.lastPathComponent
+            if isIndexedChapterName(name), let file = try inspectChapterFile(child) {
+                inventory.append(file)
+            } else if includesEditions, name.hasPrefix("edition-"), isLowercaseDigest(name.dropFirst(8)) {
+                for file in try chapterFolderContents(child) where file.pathExtension == "txt" {
+                    try Task.checkCancellation()
+                    if isLowercaseDigest(file.deletingPathExtension().lastPathComponent[...]),
+                       let chapter = try inspectChapterFile(file, inEdition: name) {
+                        inventory.append(chapter)
+                    }
+                }
+            }
+        }
+        return inventory
+    }
+
+    private func chapterFolderContents(_ folder: URL) throws -> [URL] {
+        do {
+            guard try isChapterFolder(folder) else { return [] }
+            return try FileManager.default.contentsOfDirectory(
+                at: folder, includingPropertiesForKeys: Array(Self.chapterFileKeys), options: [.skipsHiddenFiles]
+            )
+        } catch where missingChapterFile(error) {
+            return []
+        }
+    }
+
+    private func isChapterFolder(_ folder: URL) throws -> Bool {
+        do {
+            let values = try folder.resourceValues(forKeys: Self.chapterFileKeys)
+            return values.isDirectory == true && values.isSymbolicLink != true
+        } catch where missingChapterFile(error) {
+            return false
+        }
+    }
+
+    private func inspectChapterFile(_ url: URL, inEdition edition: String? = nil) throws -> ChapterFile? {
+        do {
+            let values = try url.resourceValues(forKeys: Self.chapterFileKeys)
+            guard values.isRegularFile == true, values.isSymbolicLink != true, let size = values.fileSize else { return nil }
+            let path = edition.map { "\($0)/\(url.lastPathComponent)" } ?? url.lastPathComponent
+            return ChapterFile(url: url, relativePath: path, bytes: Int64(size), modified: values.contentModificationDate)
+        } catch where missingChapterFile(error) {
+            return nil
+        }
+    }
+
+    private func isIndexedChapterName(_ name: String) -> Bool {
+        guard name.hasSuffix(".txt"), let index = Int(name.dropLast(4)), index >= 0 else { return false }
+        return indexedChapterName(index) == name
+    }
+
+    private func isLowercaseDigest(_ digest: Substring) -> Bool {
+        digest.utf8.count == 64 && digest.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+    }
+
+    private func missingChapterFile(_ error: Error) -> Bool {
+        isMissingFile(error) || (error as? CocoaError)?.code == .fileNoSuchFile
     }
 }
 
@@ -642,6 +902,7 @@ enum LibraryError: LocalizedError {
     case duplicateSubscription
     case subscriptionUnavailable
     case bookUnavailable
+    case cacheWasCleared
     case editionAlreadyOnShelf
     case catalogUnavailable(String)
 
@@ -654,6 +915,7 @@ enum LibraryError: LocalizedError {
         case .duplicateSubscription: "此地址已经订阅。"
         case .subscriptionUnavailable: "此订阅已移除。"
         case .bookUnavailable: "书架中的书籍已删除或书源已更换。"
+        case .cacheWasCleared: "下载期间清理了缓存，请重新下载这一章。"
         case .editionAlreadyOnShelf: "这个书源的版本已在书架中，可从书架单独打开。"
         case .catalogUnavailable(let detail): "无法打开书架。\(detail)"
         }

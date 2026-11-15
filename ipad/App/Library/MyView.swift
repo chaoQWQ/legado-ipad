@@ -84,7 +84,11 @@ struct MyView: View {
                 MySourceBackupView(sources: library.sources, importSources: importSources)
             } label: { label(item) }
         case .storage:
-            NavigationLink { MyStorageView() } label: { label(item) }
+            NavigationLink {
+                LibraryStorageView { book, chapter in
+                    openBookmark(book, ReaderPosition(chapterIndex: chapter))
+                }
+            } label: { label(item) }
         case .bookmarks:
             NavigationLink { MyBookmarksView(open: openBookmark) } label: { label(item) }
         case .history:
@@ -167,7 +171,7 @@ struct MyView: View {
         ]),
         MenuSection(title: "备份与存储", items: [
             Item(.backup, "书源备份", "square.and.arrow.up.on.square", "导出或恢复阅读书源 JSON"),
-            Item(.storage, "存储用量", "internaldrive", "本地书籍和在线章节占用空间")
+            Item(.storage, "存储用量", "internaldrive", "查看占用、缓存目录和清理已下载章节")
         ]),
         MenuSection(title: "工具与关于", items: [
             Item(.readerBehavior, "阅读设置", "slider.horizontal.3", "屏幕、手势和自动阅读"),
