@@ -117,6 +117,9 @@ struct ReaderView: View {
     private var effectiveScript: ReaderScript {
         script == .simplified && online?.simplifiesText == true ? .off : script
     }
+    private var titleScript: ReaderScript {
+        script == .off && online?.simplifiesTitles == true ? .simplified : script
+    }
     private var isPaged: Bool { layout.turnMode != .scroll }
     private var bookmarks: [ReaderBookmark] { ReaderBookmarks.decode(bookmarkData) }
     private var position: ReaderPosition { ReaderPosition(chapterIndex: chapterIndex, offset: offset) }
@@ -129,7 +132,7 @@ struct ReaderView: View {
     }
     private var isNight: Bool { palette == .night }
     private var chapterTitle: String {
-        chapters.indices.contains(chapterIndex) ? script.convert(chapters[chapterIndex].title) : ""
+        chapters.indices.contains(chapterIndex) ? titleScript.convert(chapters[chapterIndex].title) : ""
     }
 
     var body: some View {
@@ -141,7 +144,7 @@ struct ReaderView: View {
             .tint(palette.accent)
             .background(palette.background.ignoresSafeArea())
             .background { ReaderWindowProbe(effects: displayEffects) }
-            .navigationTitle(title)
+            .navigationTitle(titleScript.convert(title))
             .toolbar { readerToolbar }
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
@@ -280,7 +283,7 @@ struct ReaderView: View {
                 selectChapter: selectChapter,
                 openBookmark: { openPosition($0.position) },
                 deleteBookmarks: deleteBookmarks,
-                script: script,
+                script: titleScript,
                 bodyScript: effectiveScript
             )
         case .search:
@@ -296,7 +299,7 @@ struct ReaderView: View {
                         range: NSRange(location: match.utf16Offset, length: match.utf16Length)
                     )
                 )
-            }, script: effectiveScript, queryScript: script)
+            }, script: effectiveScript, queryScript: script, titleScript: titleScript)
         case .replace:
             ReaderReplaceSheet(rules: Binding(
                 get: { ReaderReplacementRule.decode(replacementData) },
@@ -1011,7 +1014,7 @@ private struct ReaderContentsView: View {
                     }
                 } header: {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(title)
+                        Text(script.convert(title))
                         if !author.isEmpty {
                             Text(author)
                         }

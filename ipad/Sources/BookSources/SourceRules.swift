@@ -262,6 +262,11 @@ func applyReplacement(_ rule: String?, to text: String, applyingTextConversion: 
 }
 
 extension BookSource {
+    /// Use the original source title or chapter name as the input.
+    public func displayTitle(_ title: String) -> String {
+        simplifiesTitles ? simplifiedChinese(title) : title
+    }
+
     public var simplifiesChapterText: Bool {
         guard let rule = contentRule?.replaceRegex?.nilIfBlank else { return false }
         return usesSimplifiedChineseConversion(rule)

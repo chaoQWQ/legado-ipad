@@ -70,4 +70,36 @@ struct BookSourceDraftTests {
         let malformed = try BookSourceDraft(json: #"{"bookSourceUrl":"https://fiction.example", "bookSourceName":"测试", "ruleToc":"invalid JSON"}"#)
         #expect(throws: BookSourceDraftError.invalidField("ruleToc")) { try malformed.makeSource() }
     }
+
+    @Test func titleSimplificationIsOptionalAndDoesNotChangeStoredTextOrRules() throws {
+        let original = try BookSourceDraft(json: #"""
+        {"bookSourceUrl":"https://fiction.example", "bookSourceName":"書源名稱",
+         "ruleToc":{"chapterName":"@css:a@text"},"ruleContent":{"content":"@css:p@text"}}
+        """#).makeSource()
+        let bookTitle = "霧裡的鐘聲 📚"
+        let chapterTitle = "第一章 國門開了"
+        #expect(!original.simplifiesTitles)
+        #expect(original.displayTitle(bookTitle) == bookTitle)
+
+        var draft = BookSourceDraft(source: original)
+        draft.simplifiesTitles = true
+        let edited = try draft.makeSource()
+        let encoded = try JSONEncoder().encode(edited)
+        let reopened = try JSONDecoder().decode(BookSource.self, from: encoded)
+        #expect(reopened.simplifiesTitles)
+        #expect(reopened.displayTitle(bookTitle) == "雾里的钟声 📚")
+        #expect(reopened.displayTitle(chapterTitle) == "第一章 国门开了")
+        #expect(reopened.name == original.name)
+        #expect(reopened.id == original.id)
+        #expect(reopened.convertCachedContent(bookTitle) == bookTitle)
+        let displayedDraft = BookSourceDraft(source: reopened)
+        #expect(try BookSourceDraft(json: displayedDraft.jsonString()).simplifiesTitles)
+        #expect(displayedDraft["chapterName", rule: "ruleToc"] == "@css:a@text")
+
+        draft.simplifiesTitles = false
+        #expect(try draft.makeSource().displayTitle(chapterTitle) == chapterTitle)
+        var normalized = reopened
+        normalized.simplifiesTitles = false
+        #expect(normalized == original)
+    }
 }

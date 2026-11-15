@@ -66,6 +66,7 @@ struct ReaderSearchSheet: View {
     let jumpTo: (ReaderSearchMatch) -> Void
     var script: ReaderScript = .off
     var queryScript: ReaderScript = .off
+    var titleScript: ReaderScript = .off
 
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
@@ -151,7 +152,7 @@ struct ReaderSearchSheet: View {
 
     private func matchRow(_ match: ReaderSearchMatch) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(queryScript.convert(chapters[match.chapterIndex].title))
+            Text(titleScript.convert(chapters[match.chapterIndex].title))
                 .font(.subheadline.weight(.semibold))
             (Text(match.before) + Text(match.highlighted).bold().foregroundColor(.accentColor) + Text(match.after))
                 .font(.footnote)

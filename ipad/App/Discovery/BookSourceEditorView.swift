@@ -123,6 +123,7 @@ struct BookSourceEditorView: View {
                 Section("书源信息") {
                     ForEach(BookSourceEditorTab.identityFields, content: input)
                     Toggle("启用书源", isOn: flag("enabled", defaultValue: true))
+                    Toggle("书名和目录转简体", isOn: $draft.simplifiesTitles)
                     Picker("书源类型", selection: $draft.sourceType) {
                         Text("文本").tag(0)
                         Text("音频").tag(1)

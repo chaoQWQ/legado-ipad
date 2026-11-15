@@ -602,6 +602,8 @@ private struct SourceSubscriptionPreview: View {
         var current = existing
         candidate.isEnabled = true
         current.isEnabled = true
+        candidate.simplifiesTitles = false
+        current.simplifiesTitles = false
         return candidate == current ? "已导入" : "规则与本机不同"
     }
 

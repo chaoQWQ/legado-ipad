@@ -111,7 +111,7 @@ struct LibraryView: View {
             get: { bookToRemove != nil },
             set: { if !$0 { bookToRemove = nil } }
         ), presenting: bookToRemove) { book in
-            Button("移除《\(book.title)》", role: .destructive) {
+            Button("移除《\(library.displayTitle(book.title, sourceID: book.sourceID))》", role: .destructive) {
                 Task {
                     do {
                         try await library.removeBook(book.id)
@@ -261,7 +261,9 @@ private struct BookshelfView: View {
     private var books: [LibraryBook] {
         let query = filter.trimmingCharacters(in: .whitespacesAndNewlines)
         return query.isEmpty ? library.books : library.books.filter {
-            $0.title.localizedStandardContains(query) || $0.author.localizedStandardContains(query)
+            $0.title.localizedStandardContains(query)
+                || $0.author.localizedStandardContains(query)
+                || library.displayTitle($0.title, sourceID: $0.sourceID).localizedStandardContains(query)
         }
     }
 
@@ -318,13 +320,14 @@ private struct BookshelfView: View {
     }
 
     private func shelfCard(_ book: LibraryBook) -> some View {
-        Button {
+        let title = library.displayTitle(book.title, sourceID: book.sourceID)
+        return Button {
             open(book)
         } label: {
             VStack(alignment: .leading, spacing: 7) {
-                BookCover(title: book.title, author: book.author, url: book.coverURL)
+                BookCover(title: title, author: book.author, url: book.coverURL)
                     .shadow(color: .black.opacity(0.14), radius: 6, x: 1, y: 4)
-                Text(book.title)
+                Text(title)
                     .font(.headline)
                     .lineLimit(2)
                     .foregroundStyle(.primary)

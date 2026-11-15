@@ -55,6 +55,11 @@ public struct BookSourceDraft: Equatable, Sendable {
         set { if newValue != sourceType { document["bookSourceType"] = .number(Decimal(newValue)) } }
     }
 
+    public var simplifiesTitles: Bool {
+        get { self[flag: BookSource.titleSimplificationKey, default: false] }
+        set { self[flag: BookSource.titleSimplificationKey, default: false] = newValue }
+    }
+
     public func jsonString() throws -> String { try Self.jsonString(document) }
 
     public func makeSource() throws -> BookSource {

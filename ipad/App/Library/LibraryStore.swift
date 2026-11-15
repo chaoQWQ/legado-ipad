@@ -113,6 +113,15 @@ final class LibraryStore: ObservableObject {
         sources.first { $0.id == book.sourceID }?.simplifiesChapterText == true
     }
 
+    func sourceSimplifiesTitles(for book: LibraryBook) -> Bool {
+        sources.first { $0.id == book.sourceID }?.simplifiesTitles == true
+    }
+
+    func displayTitle(_ title: String, sourceID: String?) -> String {
+        guard let sourceID else { return title }
+        return sources.first { $0.id == sourceID }?.displayTitle(title) ?? title
+    }
+
     func hasPosition(for id: UUID) -> Bool {
         storedPosition(for: id) != nil
     }
@@ -468,7 +477,10 @@ final class LibraryStore: ObservableObject {
         var indices = Dictionary(next.sources.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
         for var source in additions {
             if let index = indices[source.id] {
-                if preservingEnabledState { source.isEnabled = next.sources[index].isEnabled }
+                if preservingEnabledState {
+                    source.isEnabled = next.sources[index].isEnabled
+                    source.simplifiesTitles = next.sources[index].simplifiesTitles
+                }
                 next.sources[index] = source
             } else {
                 indices[source.id] = next.sources.count
@@ -480,6 +492,7 @@ final class LibraryStore: ObservableObject {
     private func sourceSignature(_ source: BookSource) throws -> String {
         var normalized = source
         normalized.isEnabled = true
+        normalized.simplifiesTitles = false
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
         return Data(SHA256.hash(data: try encoder.encode(normalized))).base64EncodedString()

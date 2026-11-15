@@ -138,7 +138,7 @@ struct ChapterDownloadView: View {
         }
         for index in range {
             guard !Task.isCancelled else { break }
-            currentTitle = book.chapters[index].title
+            currentTitle = library.displayTitle(book.chapters[index].title, sourceID: book.sourceID)
             do {
                 try await library.downloadChapter(in: book, at: index)
                 numberDownloaded += 1
@@ -180,7 +180,7 @@ struct SwitchBookSourceView: View {
         NavigationStack {
             List {
                 Section("当前书源") {
-                    LabeledContent(book.title, value: library.sourceName(for: book))
+                    LabeledContent(library.displayTitle(book.title, sourceID: book.sourceID), value: library.sourceName(for: book))
                 }
                 if isSearching {
                     Section {
@@ -200,7 +200,7 @@ struct SwitchBookSourceView: View {
                         ForEach(matches) { match in
                             Button { selection = match } label: {
                                 VStack(alignment: .leading, spacing: 5) {
-                                    Text(match.book.title).font(.headline)
+                                    Text(library.displayTitle(match.book.title, sourceID: match.book.sourceID)).font(.headline)
                                     Text([match.book.author, match.sourceName].filter { !$0.isEmpty }.joined(separator: " · "))
                                         .font(.subheadline).foregroundStyle(.secondary)
                                 }
@@ -250,7 +250,8 @@ struct SwitchBookSourceView: View {
             ), titleVisibility: .visible, presenting: selection) { match in
                 Button("使用「\(match.sourceName)」") { switchTo(match) }
             } message: { match in
-                Text([match.book.title, match.book.author].filter { !$0.isEmpty }.joined(separator: " · "))
+                let title = library.displayTitle(match.book.title, sourceID: match.book.sourceID)
+                Text([title, match.book.author].filter { !$0.isEmpty }.joined(separator: " · "))
             }
             .alert("无法更换书源", isPresented: Binding(
                 get: { switchError != nil },

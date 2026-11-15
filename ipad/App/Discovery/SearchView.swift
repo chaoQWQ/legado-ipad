@@ -107,14 +107,15 @@ struct SearchView: View {
     }
 
     private func resultRow(_ book: SourceBook) -> some View {
-        Button {
+        let title = library.displayTitle(book.title, sourceID: book.sourceID)
+        return Button {
             selection = book
         } label: {
             HStack(spacing: 14) {
-                BookCover(title: book.title, author: book.author, url: book.coverURL)
+                BookCover(title: title, author: book.author, url: book.coverURL)
                     .frame(width: 58)
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(book.title).font(.headline)
+                    Text(title).font(.headline)
                     if !book.author.isEmpty {
                         Text(book.author).font(.subheadline).foregroundStyle(.secondary)
                     }
@@ -225,6 +226,7 @@ private struct OnlineBookView: View {
     let openBook: (LibraryBook) -> Void
 
     private var book: SourceBook { details ?? result }
+    private var displayTitle: String { library.displayTitle(book.title, sourceID: book.sourceID) }
     private var existing: LibraryBook? { library.existingBook(book) ?? library.existingBook(result) }
 
     var body: some View {
@@ -232,10 +234,10 @@ private struct OnlineBookView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     HStack(alignment: .top, spacing: 20) {
-                        BookCover(title: book.title, author: book.author, url: book.coverURL)
+                        BookCover(title: displayTitle, author: book.author, url: book.coverURL)
                             .frame(width: 100)
                         VStack(alignment: .leading, spacing: 9) {
-                            Text(book.title)
+                            Text(displayTitle)
                                 .font(.system(.title2, design: .serif, weight: .semibold))
                                 .accessibilityAddTraits(.isHeader)
                             if !book.author.isEmpty {

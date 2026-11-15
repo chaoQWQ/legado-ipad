@@ -8,9 +8,14 @@ public struct BookSource: Codable, Identifiable, Equatable, Sendable {
         get { document["enabled"]?.bool ?? true }
         set { document["enabled"] = .bool(newValue) }
     }
+    public var simplifiesTitles: Bool {
+        get { document[Self.titleSimplificationKey]?.bool ?? false }
+        set { document[Self.titleSimplificationKey] = newValue ? .bool(true) : nil }
+    }
     public var lastUpdateTimestamp: Int? { document["lastUpdateTime"]?.integer.flatMap { $0 > 0 ? $0 : nil } }
     public let baseURL: URL
     private(set) var document: [String: BookSourceJSONValue]
+    static let titleSimplificationKey = "ipadSimplifyTitles"
 
     let type: Int
     let searchURL: String?
