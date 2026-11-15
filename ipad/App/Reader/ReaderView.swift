@@ -670,6 +670,8 @@ struct ReaderView: View {
 
     @ViewBuilder
     private var primaryTools: some View {
+        toolButton("目录", icon: "list.bullet") { present(.chapters) }
+            .disabled(chapters.isEmpty)
         toolButton("搜索", icon: "magnifyingglass") {
             selectedTextForTool = ""
             present(.search)
@@ -689,13 +691,11 @@ struct ReaderView: View {
             : (automaticScroll ? "暂停自动滚动" : "开始自动滚动"))
         .disabled(!hasBody)
         toolButton("替换", icon: "arrow.left.arrow.right") { present(.replace) }
-        toolButton(isNight ? "日间" : "夜间", icon: isNight ? "sun.max" : "moon", action: toggleNight)
     }
 
     @ViewBuilder
     private var secondaryTools: some View {
-        toolButton("目录", icon: "list.bullet") { present(.chapters) }
-            .disabled(chapters.isEmpty)
+        toolButton(isNight ? "日间" : "夜间", icon: isNight ? "sun.max" : "moon", action: toggleNight)
         toolButton(speech.state == .playing ? "暂停朗读" : "朗读",
                    icon: speech.state == .playing ? "pause.circle" : "headphones", action: toggleSpeech)
             .disabled(!hasBody)
