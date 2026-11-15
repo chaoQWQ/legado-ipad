@@ -82,6 +82,7 @@ enum ReadingPalette {
 
 enum ReaderFont: String, CaseIterable, Identifiable, Codable {
     case serif
+    case sourceHanSerif
     case sansSerif
     case kai
     case monospaced
@@ -91,10 +92,15 @@ enum ReaderFont: String, CaseIterable, Identifiable, Codable {
     var title: String {
         switch self {
         case .serif: "宋体"
+        case .sourceHanSerif: "思源宋体"
         case .sansSerif: "无衬线"
         case .kai: "楷体"
         case .monospaced: "等宽"
         }
+    }
+
+    var supportedWeightRange: ClosedRange<Double> {
+        self == .sourceHanSerif ? ReaderBundledFont.sourceHanWeightRange : 100...900
     }
 }
 

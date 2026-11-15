@@ -11,6 +11,15 @@ struct ReaderScrollRequest: Equatable {
     let target: Target
 }
 
+enum ReaderSelectionAction {
+    case askAI, generateImage, searchBook, searchWeb, readAloud, bookmark
+}
+
+struct ReaderTextSelection {
+    let text: String
+    let range: NSRange
+}
+
 #if os(iOS)
 import UIKit
 
@@ -27,8 +36,10 @@ struct ReaderTextPane: UIViewRepresentable {
     var pageAnimationDuration = 0.3
     var onChapterTurn: (ReaderPageDirection) -> Void = { _ in }
     var interaction = ReaderInteractionPreferences()
+    var columnWidth: CGFloat? = nil
     var onToggleControls: () -> Void = {}
     var onUserPageTurn: () -> Void = {}
+    var onSelectionAction: (ReaderSelectionAction, ReaderTextSelection) -> Void = { _, _ in }
 
     func makeUIView(context: Context) -> ReaderPagingViewport {
         let viewport = ReaderPagingViewport()
@@ -57,7 +68,10 @@ struct ReaderTextPane: UIViewRepresentable {
         viewport.onUserPageTurn = { [weak coordinator = context.coordinator] in
             coordinator?.onUserPageTurn()
         }
-        viewport.configure(mode: pageMode, animationDuration: pageAnimationDuration, interaction: interaction)
+        viewport.configure(
+            mode: pageMode, animationDuration: pageAnimationDuration,
+            interaction: interaction, columnWidth: columnWidth
+        )
         viewport.replace(text, typography: typography, at: initialOffset)
         context.coordinator.text = text
         context.coordinator.typography = typography
@@ -72,7 +86,11 @@ struct ReaderTextPane: UIViewRepresentable {
         coordinator.onChapterTurn = onChapterTurn
         coordinator.onToggleControls = onToggleControls
         coordinator.onUserPageTurn = onUserPageTurn
-        viewport.configure(mode: pageMode, animationDuration: pageAnimationDuration, interaction: interaction)
+        coordinator.onSelectionAction = onSelectionAction
+        viewport.configure(
+            mode: pageMode, animationDuration: pageAnimationDuration,
+            interaction: interaction, columnWidth: columnWidth
+        )
         let textChanged = coordinator.text != text
         let typographyChanged = coordinator.typography != typography
         if textChanged || typographyChanged {
@@ -111,6 +129,7 @@ struct ReaderTextPane: UIViewRepresentable {
         var onChapterTurn: (ReaderPageDirection) -> Void = { _ in }
         var onToggleControls: () -> Void = {}
         var onUserPageTurn: () -> Void = {}
+        var onSelectionAction: (ReaderSelectionAction, ReaderTextSelection) -> Void = { _, _ in }
         private var lastOffset: Int?
         private var pendingOffset: Int?
         private var pendingEnd = false
@@ -125,6 +144,41 @@ struct ReaderTextPane: UIViewRepresentable {
             guard let view = scrollView as? ReadingTextView, let offset = view.readingOffsetAfterScroll else { return }
             view.anchorOffset = offset
             report(offset)
+        }
+
+        func textView(
+            _ textView: UITextView,
+            editMenuForTextIn range: NSRange,
+            suggestedActions: [UIMenuElement]
+        ) -> UIMenu? {
+            let body = textView.textStorage.string as NSString
+            guard range.location != NSNotFound, range.length > 0, NSMaxRange(range) <= body.length else {
+                return nil
+            }
+            let passage = body.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !passage.isEmpty else { return nil }
+            let selection = ReaderTextSelection(text: passage, range: range)
+
+            func action(_ title: String, _ image: String, _ item: ReaderSelectionAction) -> UIAction {
+                UIAction(title: title, image: UIImage(systemName: image)) { [weak self, weak textView] _ in
+                    textView?.selectedRange = NSRange(location: range.location, length: 0)
+                    self?.onSelectionAction(item, selection)
+                }
+            }
+
+            let search = UIMenu(title: "搜索", image: UIImage(systemName: "magnifyingglass"), children: [
+                action("搜索本书", "book", .searchBook),
+                action("网页搜索", "globe", .searchWeb)
+            ])
+            let tools = UIMenu(title: "阅读工具", image: UIImage(systemName: "ellipsis.circle"), children: [
+                action("朗读选中文字", "speaker.wave.2", .readAloud),
+                action("在此处添加书签", "bookmark", .bookmark)
+            ])
+            return UIMenu(children: [
+                action("问 AI", "sparkles", .askAI),
+                action("生图", "photo", .generateImage),
+                search, tools
+            ] + suggestedActions)
         }
 
         func report(_ offset: Int, automaticEnd: Bool = false) {
@@ -186,6 +240,9 @@ final class ReadingTextView: UITextView {
             let name = typography.fontWeight >= 750 ? "Black" :
                 typography.fontWeight >= 550 ? "Bold" : typography.fontWeight < 350 ? "Light" : "Regular"
             font = UIFont(name: "SongtiSC-\(name)", size: fontSize) ?? serif ?? systemFont
+        case .sourceHanSerif:
+            font = ReaderBundledFont.sourceHanSerif(size: fontSize, weight: typography.fontWeight)
+                .map { $0 as UIFont } ?? UIFont(name: "SongtiSC-Regular", size: fontSize) ?? systemFont
         case .sansSerif:
             font = systemFont
         case .kai:
@@ -390,7 +447,8 @@ final class ReadingTextView: UITextView {
     }
 
     fileprivate func advanceAutomaticScroll(by elapsed: TimeInterval) {
-        guard let automaticSpeed, pendingTarget == nil, !isTracking, !isDragging, !isDecelerating else { return }
+        guard let automaticSpeed, pendingTarget == nil, selectedRange.length == 0,
+              !isTracking, !isDragging, !isDecelerating else { return }
         let delta = min(max(elapsed, 0), 0.05)
         let next = max(0, contentOffset.y) + automaticSpeed * delta
         let estimatedEnd = maximumScroll
@@ -434,8 +492,10 @@ struct ReaderTextPane: View {
     var pageAnimationDuration = 0.3
     var onChapterTurn: (ReaderPageDirection) -> Void = { _ in }
     var interaction = ReaderInteractionPreferences()
+    var columnWidth: CGFloat? = nil
     var onToggleControls: () -> Void = {}
     var onUserPageTurn: () -> Void = {}
+    var onSelectionAction: (ReaderSelectionAction, ReaderTextSelection) -> Void = { _, _ in }
 
     var body: some View {
         ScrollView {
@@ -443,8 +503,9 @@ struct ReaderTextPane: View {
                 .font(.system(size: typography.fontSize, design: typography.font == .serif ? .serif : .default))
                 .lineSpacing(typography.lineSpacing)
                 .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(24)
+                .frame(maxWidth: columnWidth ?? .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity)
         }
     }
 }

@@ -16,12 +16,29 @@ final class ReaderPagingViewport: UIView, UIGestureRecognizerDelegate {
     private var pageSize = CGSize.zero
     private var currentPage: ReaderPageLayout.Page?
     private var request: ReaderScrollRequest.Target?
-    private var animation: UIView?
+    private var turnAnimation: TurnAnimation?
+    private var drag: PageDrag?
     private var animationDuration = 0.3
     private var pageColor = UIColor.systemBackground
     private var interaction = ReaderInteractionPreferences()
+    private var columnWidth: CGFloat?
     private lazy var swipe = UIPanGestureRecognizer(target: self, action: #selector(swiped(_:)))
     private lazy var tap = UITapGestureRecognizer(target: self, action: #selector(tapped(_:)))
+
+    private struct TurnAnimation {
+        let overlay: UIView & ReaderPageMotion
+        let target: ReaderPageLayout.Page
+        let index: Int
+    }
+
+    private struct PageDrag {
+        let direction: ReaderPageDirection
+        let cornerAtTop: Bool
+
+        func forwardDistance(_ translation: CGFloat) -> CGFloat {
+            direction == .next ? -translation : translation
+        }
+    }
 
     init() {
         super.init(frame: .zero)
@@ -40,9 +57,16 @@ final class ReaderPagingViewport: UIView, UIGestureRecognizerDelegate {
 
     required init?(coder: NSCoder) { nil }
 
-    func configure(mode: ReaderPageMode, animationDuration: Double, interaction: ReaderInteractionPreferences) {
+    func configure(mode: ReaderPageMode, animationDuration: Double, interaction: ReaderInteractionPreferences,
+                   columnWidth: CGFloat? = nil) {
         self.animationDuration = animationDuration
         self.interaction = interaction
+        if self.columnWidth != columnWidth {
+            self.columnWidth = columnWidth
+            cancelAnimation()
+            pages = nil
+            setNeedsLayout()
+        }
         if textView.isSelectable != interaction.allowsTextSelection {
             textView.isSelectable = interaction.allowsTextSelection
         }
@@ -85,6 +109,12 @@ final class ReaderPagingViewport: UIView, UIGestureRecognizerDelegate {
     }
 
     func seek(to target: ReaderScrollRequest.Target) {
+        if turnAnimation != nil || drag != nil {
+            switch target {
+            case .page, .reveal: return
+            case .offset: break
+            }
+        }
         cancelAnimation()
         if mode == .scroll {
             if case .page(let direction) = target {
@@ -106,7 +136,8 @@ final class ReaderPagingViewport: UIView, UIGestureRecognizerDelegate {
         let resized = pageSize != bounds.size
         pageSize = bounds.size
         if resized { cancelAnimation() }
-        textView.frame = bounds
+        let width = min(bounds.width, columnWidth ?? bounds.width)
+        textView.frame = CGRect(x: bounds.midX - width / 2, y: bounds.minY, width: width, height: bounds.height)
         textView.layoutIfNeeded()
         guard bounds.width > 0, bounds.height > 0, textView.textStorage.length > 0 else { return }
 
@@ -132,8 +163,11 @@ final class ReaderPagingViewport: UIView, UIGestureRecognizerDelegate {
     }
 
     func cancelAnimation() {
-        animation?.removeFromSuperview()
-        animation = nil
+        drag = nil
+        let overlay = turnAnimation?.overlay
+        turnAnimation = nil
+        overlay?.stop()
+        overlay?.removeFromSuperview()
     }
 
     private var pageTextHeight: CGFloat {
@@ -167,7 +201,7 @@ final class ReaderPagingViewport: UIView, UIGestureRecognizerDelegate {
         CATransaction.setDisableActions(true)
         pageMask.frame = textView.bounds
         pageMask.path = UIBezierPath(rect: CGRect(
-            x: 0, y: textView.textContainerInset.top, width: bounds.width,
+            x: 0, y: textView.textContainerInset.top, width: textView.bounds.width,
             height: min(pageTextHeight, page.bottom - page.top)
         )).cgPath
         CATransaction.commit()
@@ -175,28 +209,38 @@ final class ReaderPagingViewport: UIView, UIGestureRecognizerDelegate {
     }
 
     @discardableResult
-    private func turn(_ direction: ReaderPageDirection) -> Bool {
+    private func turn(_ direction: ReaderPageDirection, touch: CGPoint? = nil) -> Bool {
         if mode == .scroll {
             if !textView.turnViewport(direction, animated: interaction.animatesScrollTaps) {
                 crossChapterBoundary(direction)
             }
             return true
         }
-        guard let pages, let currentPage, animation == nil else { return false }
+        guard let pages, currentPage != nil, turnAnimation == nil else { return false }
         let nextIndex = pageIndex + (direction == .next ? 1 : -1)
         guard let next = pages.page(at: nextIndex) else {
             crossChapterBoundary(direction)
             return true
         }
 
-        show(next, index: nextIndex)
-        textView.anchorOffset = next.characters.location
+        if startAnimation(
+            to: next, index: nextIndex, direction: direction,
+            cornerAtTop: direction == .next && (touch?.y ?? bounds.midY) < bounds.midY
+        ) {
+            settleAnimation(advances: true)
+        } else {
+            commit(next, index: nextIndex)
+        }
+        return true
+    }
+
+    private func commit(_ page: ReaderPageLayout.Page, index: Int) {
+        show(page, index: index)
+        textView.anchorOffset = page.characters.location
         onPageOffset(textView.anchorOffset)
-        animate(from: currentPage, to: next, direction: direction)
         if UIAccessibility.isVoiceOverRunning {
             UIAccessibility.post(notification: .pageScrolled, argument: "第 \(pageIndex + 1) 页")
         }
-        return true
     }
 
     private func crossChapterBoundary(_ direction: ReaderPageDirection) {
@@ -208,11 +252,11 @@ final class ReaderPagingViewport: UIView, UIGestureRecognizerDelegate {
     }
 
     @discardableResult
-    private func turnFromUser(_ direction: ReaderPageDirection) -> Bool {
-        guard animation == nil else { return false }
+    private func turnFromUser(_ direction: ReaderPageDirection, touch: CGPoint? = nil) -> Bool {
+        guard turnAnimation == nil, drag == nil else { return false }
         textView.setAutomaticSpeed(nil)
         onUserPageTurn()
-        return turn(direction)
+        return turn(direction, touch: touch)
     }
 
     private func installAccessibilityActions() {
@@ -234,7 +278,7 @@ final class ReaderPagingViewport: UIView, UIGestureRecognizerDelegate {
         guard textView.selectedRange.length == 0 else { return false }
         if let pan = gestureRecognizer as? UIPanGestureRecognizer {
             let velocity = pan.velocity(in: self)
-            return mode != .scroll && abs(velocity.x) > abs(velocity.y)
+            return mode != .scroll && turnAnimation == nil && abs(velocity.x) > abs(velocity.y)
         }
         return tapAction(at: gestureRecognizer.location(in: self)) != .none
     }
@@ -256,20 +300,60 @@ final class ReaderPagingViewport: UIView, UIGestureRecognizerDelegate {
     }
 
     @objc private func swiped(_ recognizer: UIPanGestureRecognizer) {
-        guard recognizer.state == .ended else { return }
-        let translation = recognizer.translation(in: self).x
-        let defaultDistance = max(28, bounds.width * 0.07)
-        let distance = interaction.swipeThreshold > 0
-            ? min(bounds.width * 0.65, interaction.swipeThreshold)
-            : defaultDistance
-        guard abs(translation) >= distance else { return }
-        turnFromUser(translation < 0 ? .next : .previous)
+        let translation = recognizer.translation(in: self)
+        let velocity = recognizer.velocity(in: self).x
+        switch recognizer.state {
+        case .began:
+            guard turnAnimation == nil, drag == nil else { return }
+            let direction: ReaderPageDirection = (translation.x == 0 ? velocity : translation.x) < 0 ? .next : .previous
+            let originY = recognizer.location(in: self).y - translation.y
+            let cornerAtTop = direction == .next && originY < bounds.midY
+            drag = PageDrag(direction: direction, cornerAtTop: cornerAtTop)
+            textView.setAutomaticSpeed(nil)
+            onUserPageTurn()
+            let index = pageIndex + (direction == .next ? 1 : -1)
+            if let candidate = pages?.page(at: index) {
+                _ = startAnimation(to: candidate, index: index, direction: direction, cornerAtTop: cornerAtTop)
+            }
+            updateDrag(translation)
+        case .changed:
+            updateDrag(translation)
+        case .ended:
+            guard let drag else { return }
+            updateDrag(translation)
+            self.drag = nil
+            let threshold = interaction.swipeThreshold > 0
+                ? min(bounds.width * 0.65, interaction.swipeThreshold)
+                : 24
+            let forwardVelocity = drag.direction == .next ? -velocity : velocity
+            let advances = drag.forwardDistance(translation.x) >= threshold && forwardVelocity > -360
+            if turnAnimation != nil {
+                settleAnimation(advances: advances)
+            } else if advances {
+                turn(drag.direction, touch: recognizer.location(in: self))
+            }
+        case .cancelled, .failed:
+            if drag != nil {
+                drag = nil
+                settleAnimation(advances: false)
+            }
+        default: break
+        }
+    }
+
+    private func updateDrag(_ translation: CGPoint) {
+        guard let drag, let turnAnimation else { return }
+        turnAnimation.overlay.update(
+            progress: drag.forwardDistance(translation.x) / max(1, bounds.width),
+            lift: (drag.cornerAtTop ? translation.y : -translation.y) * 0.65
+        )
     }
 
     @objc private func tapped(_ recognizer: UITapGestureRecognizer) {
-        switch tapAction(at: recognizer.location(in: self)) {
-        case .previousPage: turnFromUser(.previous)
-        case .nextPage: turnFromUser(.next)
+        let point = recognizer.location(in: self)
+        switch tapAction(at: point) {
+        case .previousPage: turnFromUser(.previous, touch: point)
+        case .nextPage: turnFromUser(.next, touch: point)
         case .showControls: onToggleControls()
         case .none: break
         }
@@ -278,89 +362,67 @@ final class ReaderPagingViewport: UIView, UIGestureRecognizerDelegate {
     private func tapAction(at point: CGPoint) -> ReaderTapAction {
         if point.x < bounds.width / 3 { return interaction.tapPrevious }
         if point.x > bounds.width * 2 / 3 { return interaction.tapNext }
+        if point.y < bounds.height / 3 { return interaction.tapPrevious }
+        if point.y > bounds.height * 2 / 3 { return interaction.tapNext }
         return interaction.tapCenter
     }
 
-    private func animate(
-        from sourcePage: ReaderPageLayout.Page, to targetPage: ReaderPageLayout.Page,
-        direction: ReaderPageDirection
-    ) {
+    private func startAnimation(
+        to targetPage: ReaderPageLayout.Page, index: Int, direction: ReaderPageDirection,
+        cornerAtTop: Bool
+    ) -> Bool {
         guard window != nil, mode != .none, !UIAccessibility.isReduceMotionEnabled,
-              animationDuration > 0 else { return }
-        let overlay = UIView(frame: bounds)
-        overlay.isUserInteractionEnabled = false
-        overlay.clipsToBounds = true
-        overlay.backgroundColor = pageColor
-        let source = pageImage(sourcePage)
+              animationDuration > 0, let currentPage else { return false }
+        let source = pageImage(currentPage)
         let target = pageImage(targetPage)
-        addSubview(overlay)
-        animation = overlay
-
-        func finish() {
-            overlay.removeFromSuperview()
-            if animation === overlay { animation = nil }
-        }
-
-        let duration = min(1.5, animationDuration)
+        let overlay: UIView & ReaderPageMotion
         if mode == .curl {
-            overlay.addSubview(source)
-            UIView.transition(
-                from: source, to: target, duration: min(1.5, duration * 1.6),
-                options: direction == .next ? .transitionCurlUp : .transitionCurlDown
-            ) { _ in finish() }
-            return
+            overlay = ReaderPageCurl(
+                frame: bounds, source: source, target: target, direction: direction,
+                cornerAtTop: cornerAtTop, paperColor: pageColor
+            )
+        } else {
+            overlay = ReaderPageTranslation(
+                frame: bounds, source: source, target: target, mode: mode,
+                direction: direction, paperColor: pageColor
+            )
         }
-
-        let next = direction == .next
-        let distance = next ? bounds.width : -bounds.width
-        let slide = mode == .slide
-        let linked = mode == .weread
-        let moving = next || slide ? source : target
-        let covered = next || slide ? target : source
-        overlay.addSubview(covered)
-        overlay.addSubview(moving)
-        let targetStart = slide || !next ? distance : (linked ? distance * 0.2 : 0)
-        target.transform = CGAffineTransform(translationX: targetStart, y: 0)
-        let sourceEnd = slide || next ? -distance : (linked ? -distance * 0.2 : 0)
-
-        let shade = UIView(frame: covered.bounds)
-        if linked {
-            shade.backgroundColor = .black
-            shade.alpha = next ? 0.19 : 0
-            covered.addSubview(shade)
-        }
-        if !slide {
-            moving.layer.shadowColor = UIColor.black.cgColor
-            moving.layer.shadowOpacity = 0.18
-            moving.layer.shadowRadius = 12
-            moving.layer.shadowOffset = CGSize(width: next ? 9 : -9, height: 0)
-            moving.layer.shadowPath = UIBezierPath(rect: moving.bounds).cgPath
-        }
-        UIView.animate(withDuration: linked ? duration * 1.25 : duration, delay: 0, options: .curveEaseInOut) {
-            source.transform = CGAffineTransform(translationX: sourceEnd, y: 0)
-            target.transform = .identity
-            shade.alpha = next ? 0 : 0.15
-        } completion: { _ in finish() }
+        addSubview(overlay)
+        overlay.update(progress: 0, lift: 0)
+        turnAnimation = TurnAnimation(overlay: overlay, target: targetPage, index: index)
+        return true
     }
 
-    private func pageImage(_ page: ReaderPageLayout.Page) -> UIImageView {
+    private func settleAnimation(advances: Bool) {
+        guard let turn = turnAnimation else { return }
+        let multiplier = mode == .curl ? 1.55 : mode == .weread ? 1.25 : 1
+        turn.overlay.settle(
+            advances: advances,
+            duration: min(1.5, animationDuration * multiplier)
+        ) { [weak self, weak overlay = turn.overlay] in
+            guard let self, let overlay, self.turnAnimation?.overlay === overlay,
+                  let completed = self.turnAnimation else { return }
+            self.turnAnimation = nil
+            if advances { self.commit(completed.target, index: completed.index) }
+            overlay.removeFromSuperview()
+        }
+    }
+
+    private func pageImage(_ page: ReaderPageLayout.Page) -> UIImage {
         let render = UIGraphicsImageRenderer(size: bounds.size)
         let insets = textView.textContainerInset
-        let origin = CGPoint(x: insets.left, y: insets.top - page.top)
-        let image = render.image { context in
+        let origin = CGPoint(x: textView.frame.minX + insets.left, y: insets.top - page.top)
+        return render.image { context in
             pageColor.setFill()
             context.fill(bounds)
             let clipped = CGRect(
-                x: 0, y: insets.top, width: bounds.width,
+                x: textView.frame.minX, y: insets.top, width: textView.bounds.width,
                 height: min(pageTextHeight, page.bottom - page.top)
             )
             context.cgContext.clip(to: clipped)
             textView.layoutManager.drawBackground(forGlyphRange: page.glyphs, at: origin)
             textView.layoutManager.drawGlyphs(forGlyphRange: page.glyphs, at: origin)
         }
-        let view = UIImageView(image: image)
-        view.frame = bounds
-        return view
     }
 }
 #endif

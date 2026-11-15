@@ -7,6 +7,7 @@ private enum LibraryDestination: String, CaseIterable, Identifiable {
     case search
     case sources
     case subscriptions
+    case mine
 
     var id: Self { self }
     var title: String {
@@ -15,6 +16,7 @@ private enum LibraryDestination: String, CaseIterable, Identifiable {
         case .search: "搜书"
         case .sources: "书源"
         case .subscriptions: "订阅"
+        case .mine: "我的"
         }
     }
     var icon: String {
@@ -23,6 +25,7 @@ private enum LibraryDestination: String, CaseIterable, Identifiable {
         case .search: "magnifyingglass"
         case .sources: "text.badge.checkmark"
         case .subscriptions: "dot.radiowaves.left.and.right"
+        case .mine: "person.crop.circle"
         }
     }
 }
@@ -107,11 +110,12 @@ struct LibraryView: View {
         .alert(item: $notice) { notice in
             Alert(title: Text(notice.title), message: Text(notice.message))
         }
-        .confirmationDialog("从书架移除", isPresented: Binding(
+        .alert("从书架移除？", isPresented: Binding(
             get: { bookToRemove != nil },
             set: { if !$0 { bookToRemove = nil } }
         ), presenting: bookToRemove) { book in
-            Button("移除《\(library.displayTitle(book.title, sourceID: book.sourceID))》", role: .destructive) {
+            Button("取消", role: .cancel) {}
+            Button("移除", role: .destructive) {
                 Task {
                     do {
                         try await library.removeBook(book.id)
@@ -120,6 +124,9 @@ struct LibraryView: View {
                     }
                 }
             }
+        } message: { book in
+            let title = library.displayTitle(book.title, sourceID: book.sourceID)
+            Text("将《\(title)》移出书架并清除应用内的正文、书签和阅读进度。")
         }
     }
 
@@ -148,6 +155,18 @@ struct LibraryView: View {
             )
         case .subscriptions:
             SubscriptionsHomeView()
+        case .mine:
+            MyView(
+                showSources: { select(.sources) },
+                showSubscriptions: { select(.subscriptions) },
+                importBooks: { presentImporter(.books) },
+                importSources: { presentImporter(.sources) },
+                openBook: { reader = $0 },
+                openBookmark: { book, position in
+                    library.savePosition(position, for: book)
+                    reader = book
+                }
+            )
         }
     }
 
@@ -170,7 +189,7 @@ struct LibraryView: View {
                     Button("从网址导入", systemImage: "link") { showsAddressImport = true }
                 }
             }
-        case .search, .subscriptions:
+        case .search, .subscriptions, .mine:
             ToolbarItem(placement: .primaryAction) { EmptyView() }
         }
     }

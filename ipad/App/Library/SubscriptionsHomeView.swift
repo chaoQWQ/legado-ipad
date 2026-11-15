@@ -86,14 +86,17 @@ struct SubscriptionsHomeView: View {
         .sheet(item: $editFeed) { target in
             NavigationStack { FeedEditorView(subscription: target.feed) }
         }
-        .confirmationDialog("取消订阅", isPresented: Binding(
+        .alert("移除订阅？", isPresented: Binding(
             get: { pendingRemoval != nil },
             set: { if !$0 { pendingRemoval = nil } }
         ), presenting: pendingRemoval) { feed in
-            Button("移除「\(feed.name)」", role: .destructive) {
+            Button("取消", role: .cancel) {}
+            Button("移除", role: .destructive) {
                 do { try library.removeFeed(feed.id) }
                 catch { removalError = error.localizedDescription }
             }
+        } message: { feed in
+            Text("将移除「\(feed.name)」的订阅。")
         }
         .alert("无法移除订阅", isPresented: Binding(
             get: { removalError != nil },

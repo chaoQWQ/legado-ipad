@@ -71,19 +71,20 @@ struct SourceSubscriptionsView: View {
         .sheet(item: $edit) { draft in
             SourceSubscriptionEditor(draft: draft)
         }
-        .confirmationDialog("删除订阅", isPresented: Binding(
+        .alert("删除订阅？", isPresented: Binding(
             get: { pendingRemoval != nil },
             set: { if !$0 { pendingRemoval = nil } }
         ), presenting: pendingRemoval) { subscription in
-            Button("删除「\(subscription.name)」", role: .destructive) {
+            Button("取消", role: .cancel) {}
+            Button("删除", role: .destructive) {
                 do {
                     try library.removeSourceSubscription(subscription.id)
                 } catch {
                     errorMessage = error.localizedDescription
                 }
             }
-        } message: { _ in
-            Text("从这个地址导入的书源会继续保留在书源管理中。")
+        } message: { subscription in
+            Text("删除后将停止检查「\(subscription.name)」的书源更新。")
         }
         .alert("无法删除订阅", isPresented: showingError($errorMessage)) {
             Button("好", role: .cancel) {}

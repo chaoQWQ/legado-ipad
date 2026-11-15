@@ -39,12 +39,13 @@ struct ReaderView: View {
     @State private var scrollRequest: ReaderScrollRequest?
     @State private var highlight: SearchHighlight?
     @State private var automaticScroll = false
-    @State private var showsTray = true
+    @State private var showsTray = false
     @State private var errorMessage: String?
     @State private var attempt = 0
     @State private var refreshRequest: RefreshRequest?
     @State private var refreshError: String?
     @State private var activeSheet: Sheet?
+    @State private var selectedTextForTool = ""
     @State private var saveTask: Task<Void, Never>?
     @State private var savedPosition: ReaderPosition?
     @State private var chapterPreview: Int?
@@ -148,6 +149,7 @@ struct ReaderView: View {
             .toolbar { readerToolbar }
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar(showsTray || !hasBody ? .visible : .hidden, for: .navigationBar)
             .toolbarBackground(palette.panel.opacity(behavior.menuOpacity), for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .toolbarColorScheme(theme.colorScheme, for: .navigationBar)
@@ -299,7 +301,14 @@ struct ReaderView: View {
                         range: NSRange(location: match.utf16Offset, length: match.utf16Length)
                     )
                 )
-            }, script: effectiveScript, queryScript: script, titleScript: titleScript)
+            }, script: effectiveScript, queryScript: script, titleScript: titleScript,
+            initialQuery: selectedTextForTool)
+        case .webSearch:
+            ReaderWebSearchSheet(query: selectedTextForTool)
+        case .askAI:
+            ReaderAISheet(kind: .question, excerpt: selectedTextForTool)
+        case .generateImage:
+            ReaderAISheet(kind: .image, excerpt: selectedTextForTool)
         case .replace:
             ReaderReplaceSheet(rules: Binding(
                 get: { ReaderReplacementRule.decode(replacementData) },
@@ -375,10 +384,13 @@ struct ReaderView: View {
                             swipeThreshold: behavior.swipeThreshold,
                             animatesScrollTaps: behavior.animatesScrollTaps && !reduceMotion
                         ),
+                        columnWidth: layout.columnWidth.maxWidth,
                         onToggleControls: toggleControls,
-                        onUserPageTurn: prepareManualPageTurn
+                        onUserPageTurn: prepareManualPageTurn,
+                        onSelectionAction: { action, selection in
+                            useSelection(action, selection: selection, in: content)
+                        }
                     )
-                    .frame(maxWidth: layout.columnWidth.maxWidth)
                     .id(content.id)
                 }
             } else if let errorMessage {
@@ -402,9 +414,7 @@ struct ReaderView: View {
             if !chapters.isEmpty && hasChapterHeader { chapterHeader }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            if !chapters.isEmpty, showsTray || automaticScroll || speech.state != .idle {
-                controlsPanel
-            } else if !chapters.isEmpty && information.showsReadingProgress {
+            if !chapters.isEmpty && information.showsReadingProgress {
                 Text(scrollFraction.formatted(.percent.precision(.fractionLength(0))))
                     .font(.caption.monospacedDigit())
                     .accessibilityLabel("章内阅读进度")
@@ -414,6 +424,13 @@ struct ReaderView: View {
                     .background(palette.background)
             }
         }
+        .overlay(alignment: .bottom) {
+            if !chapters.isEmpty, showsTray || automaticScroll || speech.state != .idle {
+                controlsPanel
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: showsTray)
     }
 
     private var showsChapterHeading: Bool {
@@ -458,7 +475,7 @@ struct ReaderView: View {
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 9)
-        .background(palette.panel.opacity(behavior.menuOpacity))
+        .background(showsTray ? palette.panel.opacity(behavior.menuOpacity) : palette.background)
     }
 
     private var controlsPanel: some View {
@@ -517,9 +534,10 @@ struct ReaderView: View {
         }
         .frame(maxWidth: 880)
         .frame(maxWidth: .infinity)
-        .padding(.bottom, 4)
+        .padding(.vertical, 5)
         .background(palette.panel.opacity(behavior.menuOpacity),
                     in: UnevenRoundedRectangle(topLeadingRadius: 18, topTrailingRadius: 18))
+        .shadow(color: .black.opacity(0.12), radius: 12, y: -2)
     }
 
     private var brightnessControl: some View {
@@ -634,7 +652,10 @@ struct ReaderView: View {
 
     @ViewBuilder
     private var primaryTools: some View {
-        toolButton("搜索", icon: "magnifyingglass") { present(.search) }
+        toolButton("搜索", icon: "magnifyingglass") {
+            selectedTextForTool = ""
+            present(.search)
+        }
             .disabled(chapters.isEmpty)
         toolButton(automaticScroll ? "暂停" : "自动", icon: automaticScroll ? "pause.circle" : "play.rectangle") {
             displayEffects.noteActivity()
@@ -657,7 +678,8 @@ struct ReaderView: View {
     private var secondaryTools: some View {
         toolButton("目录", icon: "list.bullet") { present(.chapters) }
             .disabled(chapters.isEmpty)
-        toolButton("朗读", icon: "headphones", action: toggleSpeech)
+        toolButton(speech.state == .playing ? "暂停朗读" : "朗读",
+                   icon: speech.state == .playing ? "pause.circle" : "headphones", action: toggleSpeech)
             .disabled(!hasBody)
         toolButton("界面", icon: "textformat.size") { present(.appearance) }
         toolButton("设置", icon: "gearshape") { present(.settings) }
@@ -667,15 +689,15 @@ struct ReaderView: View {
         Button(action: action) {
             VStack(spacing: 4) {
                 Image(systemName: icon)
-                    .font(.body)
+                    .font(.system(size: 19, weight: .medium))
                 Text(title)
                     .font(.caption)
                     .lineLimit(1)
             }
-            .frame(minWidth: 56, maxWidth: .infinity, minHeight: 52)
+            .frame(minWidth: 64, maxWidth: .infinity, minHeight: 60)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.borderless)
+        .buttonStyle(ReaderToolButtonStyle(accent: palette.accent, foreground: palette.foreground))
         .accessibilityLabel(title)
     }
 
@@ -683,6 +705,26 @@ struct ReaderView: View {
         displayEffects.noteActivity()
         finishAutomaticScroll()
         activeSheet = sheet
+    }
+
+    private func useSelection(_ action: ReaderSelectionAction, selection: ReaderTextSelection, in content: ChapterContent) {
+        guard self.content?.id == content.id else { return }
+        displayEffects.noteActivity()
+        finishAutomaticScroll()
+        selectedTextForTool = selection.text
+        switch action {
+        case .searchBook: present(.search)
+        case .searchWeb: present(.webSearch)
+        case .askAI: present(.askAI)
+        case .generateImage: present(.generateImage)
+        case .readAloud:
+            speech.start(text: selection.text, utf16Offset: 0)
+        case .bookmark:
+            let originalOffset = content.transform.originalOffset(forDisplay: selection.range.location)
+            let position = ReaderPosition(chapterIndex: content.index, offset: originalOffset)
+            guard !bookmarks.contains(where: { $0.position == position }) else { return }
+            bookmarkData = ReaderBookmarks.encode([ReaderBookmark(position: position, text: content.text)] + bookmarks)
+        }
     }
 
     private func toggleControls() {
@@ -928,11 +970,26 @@ struct ReaderView: View {
         case settings
         case appearance
         case search
+        case webSearch
+        case askAI
+        case generateImage
         case replace
         case download
         case changeSource
 
         var id: Self { self }
+    }
+}
+
+private struct ReaderToolButtonStyle: ButtonStyle {
+    let accent: Color
+    let foreground: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(accent.opacity(configuration.isPressed ? 0.15 : 0),
+                        in: .rect(cornerRadius: 11))
+            .foregroundStyle(configuration.isPressed ? accent : foreground)
     }
 }
 

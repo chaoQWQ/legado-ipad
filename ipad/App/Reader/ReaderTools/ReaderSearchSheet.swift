@@ -79,6 +79,24 @@ struct ReaderSearchSheet: View {
 
     private let resultLimit = 200
 
+    init(
+        chapters: [ReaderChapter],
+        loadChapter: @escaping (Int) async throws -> String?,
+        jumpTo: @escaping (ReaderSearchMatch) -> Void,
+        script: ReaderScript = .off,
+        queryScript: ReaderScript = .off,
+        titleScript: ReaderScript = .off,
+        initialQuery: String = ""
+    ) {
+        self.chapters = chapters
+        self.loadChapter = loadChapter
+        self.jumpTo = jumpTo
+        self.script = script
+        self.queryScript = queryScript
+        self.titleScript = titleScript
+        _query = State(initialValue: initialQuery)
+    }
+
     var body: some View {
         NavigationStack {
             List {

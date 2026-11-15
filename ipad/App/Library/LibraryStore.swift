@@ -54,6 +54,7 @@ final class LibraryStore: ObservableObject {
     let client: BookSourceClient
     var books: [LibraryBook] { catalog.books }
     var sources: [BookSource] { catalog.sources }
+    var bookStorageDirectory: URL { files.root }
     var sourceSubscriptions: [BookSourceSubscription] { catalog.sourceSubscriptions ?? [] }
     var subscriptionsWithUpdates: Set<UUID> { catalog.pendingSubscriptionUpdates ?? [] }
     var feeds: [FeedSubscription] { catalog.feeds ?? [] }

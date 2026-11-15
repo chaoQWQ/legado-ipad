@@ -61,7 +61,10 @@ struct ReaderAppearanceConfigurationView: View {
         VStack(alignment: .leading, spacing: 13) {
             ReaderPillPicker("翻页方式", choices: Array(ReaderPageMode.allCases), selection: $layout.turnMode, palette: palette, title: { $0.title })
             ReaderPillPicker("翻页速度", choices: Array(ReaderPageSpeed.allCases), selection: $layout.turnSpeed, palette: palette, title: { $0.title })
-            ReaderMetricControl("字重", value: $layout.fontWeight, range: 100...900, step: 50, accent: palette.accent)
+            ReaderMetricControl(
+                "字重", value: displayedFontWeight, range: layout.font.supportedWeightRange,
+                step: 50, accent: palette.accent
+            )
             ScrollView(.horizontal) {
                 HStack(spacing: 7) {
                     Menu {
@@ -103,6 +106,14 @@ struct ReaderAppearanceConfigurationView: View {
         }
         .padding(13)
         .background(palette.panel, in: .rect(cornerRadius: 16))
+    }
+
+    private var displayedFontWeight: Binding<Double> {
+        let range = layout.font.supportedWeightRange
+        return Binding(
+            get: { min(range.upperBound, max(range.lowerBound, layout.fontWeight)) },
+            set: { layout.fontWeight = $0 }
+        )
     }
 
     private var themes: some View {
@@ -213,9 +224,9 @@ struct ReaderBehaviorConfigurationView: View {
                     }
                 }
                 Section("点按区域") {
-                    configurationPicker("左侧", selection: $behavior.tapPrevious, title: { $0.title })
-                    configurationPicker("中央", selection: $behavior.tapCenter, title: { $0.title })
-                    configurationPicker("右侧", selection: $behavior.tapNext, title: { $0.title })
+                    configurationPicker("左侧和上方", selection: $behavior.tapPrevious, title: { $0.title })
+                    configurationPicker("正中央", selection: $behavior.tapCenter, title: { $0.title })
+                    configurationPicker("右侧和下方", selection: $behavior.tapNext, title: { $0.title })
                 }
                 Section("阅读工具栏") {
                     ReaderMetricControl("菜单不透明度", value: $behavior.menuOpacity, range: 0.35...1, step: 0.05, accent: palette.accent) { value in

@@ -97,15 +97,16 @@ struct SourcesView: View {
             }
         }
         .searchable(text: $filter, prompt: "查找书源名、分组或地址")
-        .confirmationDialog("删除书源", isPresented: Binding(
+        .alert("删除书源？", isPresented: Binding(
             get: { pendingRemoval != nil },
             set: { if !$0 { pendingRemoval = nil } }
         ), presenting: pendingRemoval) { source in
-            Button("删除「\(source.name)」", role: .destructive) {
+            Button("取消", role: .cancel) {}
+            Button("删除", role: .destructive) {
                 do { try library.removeSource(source.id) } catch { showError(error) }
             }
-        } message: { _ in
-            Text("该书源的书籍和已缓存章节会保留在书架，加载其他章节需要重新导入书源。")
+        } message: { source in
+            Text("删除「\(source.name)」后，加载该书源的其他章节需重新导入书源。")
         }
     }
 
