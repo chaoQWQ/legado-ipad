@@ -148,6 +148,28 @@ struct BookSourceTests {
         #expect(try JSONDecoder().decode([BookSource].self, from: JSONEncoder().encode(sources)) == sources)
     }
 
+    @Test func explicitChapterRefreshRevalidatesAllPages() async throws {
+        let source = try importSource(#"""
+        {
+          "bookSourceUrl":"https://fiction.example", "bookSourceName":"分页",
+          "ruleContent":{"content":"@css:p@text", "nextContentUrl":"@css:a@href"}
+        }
+        """#)
+        let url = try #require(URL(string: "https://fiction.example/chapter"))
+        let client = BookSourceClient { request, _ in
+            #expect(request.cachePolicy == .reloadIgnoringLocalCacheData)
+            #expect(request.value(forHTTPHeaderField: "Cache-Control") == "no-cache")
+            let page = try #require(request.url)
+            switch page.path {
+            case "/chapter": return self.response(page, #"<p>前半章</p><a href="/second">下一页</a>"#)
+            case "/second": return self.response(page, "<p>后半章</p>")
+            default: throw URLError(.unsupportedURL)
+            }
+        }
+        let text = try await client.content(of: SourceChapter(title: "第一章", url: url), in: source, bypassCache: true)
+        #expect(text == "前半章\n\n后半章")
+    }
+
     private func importSource(_ json: String) throws -> BookSource {
         try #require(BookSourceImport.decode(Data(json.utf8)).first)
     }

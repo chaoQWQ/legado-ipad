@@ -72,9 +72,13 @@ struct LibraryView: View {
         }
         .navigationSplitViewStyle(.balanced)
         #if os(iOS)
-        .fullScreenCover(item: $reader) { book in readingSession(for: book) }
+        .fullScreenCover(item: $reader) { book in
+            LibraryReadingSession(bookID: book.id) { reader = nil }
+        }
         #else
-        .sheet(item: $reader) { book in readingSession(for: book) }
+        .sheet(item: $reader) { book in
+            LibraryReadingSession(bookID: book.id) { reader = nil }
+        }
         #endif
         .fileImporter(
             isPresented: $isImporterPresented,
@@ -118,30 +122,6 @@ struct LibraryView: View {
             )
         case .sources:
             SourcesView(importSources: { presentImporter(.sources) }, showError: showError)
-        }
-    }
-
-    private func readingSession(for book: LibraryBook) -> some View {
-        NavigationStack {
-            ReaderView(
-                bookID: book.id,
-                title: book.title,
-                author: book.author,
-                chapters: book.chapters.map { ReaderChapter(title: $0.title) },
-                initialPosition: library.position(for: book.id),
-                loadChapter: { index in try await library.chapter(in: book, at: index) },
-                onProgress: { library.savePosition($0, for: book.id) }
-            )
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button {
-                        reader = nil
-                    } label: {
-                        Label("返回书架", systemImage: "chevron.backward")
-                    }
-                    .keyboardShortcut(.escape, modifiers: [])
-                }
-            }
         }
     }
 

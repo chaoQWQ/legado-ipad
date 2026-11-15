@@ -1,5 +1,21 @@
 import SwiftUI
 
+struct ReaderScrollRequest: Equatable {
+    enum Target: Equatable {
+        case offset(Int)
+        case fraction(Double)
+        case reveal(Int)
+    }
+
+    let id = UUID()
+    let target: Target
+}
+
+struct ReaderScrollReport: Equatable {
+    let offset: Int?
+    let fraction: Double
+}
+
 #if os(iOS)
 import UIKit
 
@@ -7,7 +23,11 @@ struct ReaderTextPane: UIViewRepresentable {
     let text: String
     let typography: ReaderTypography
     let initialOffset: Int
-    let onOffset: (Int) -> Void
+    let request: ReaderScrollRequest?
+    let highlight: NSRange?
+    let automaticSpeed: Double?
+    let onScroll: (ReaderScrollReport) -> Void
+    let onAutomaticEnd: () -> Void
 
     func makeUIView(context: Context) -> ReadingTextView {
         let view = ReadingTextView(usingTextLayoutManager: false)
@@ -16,41 +36,100 @@ struct ReaderTextPane: UIViewRepresentable {
         view.backgroundColor = .clear
         view.alwaysBounceVertical = false
         view.contentInsetAdjustmentBehavior = .never
-        view.textContainerInset = UIEdgeInsets(top: 24, left: 24, bottom: 28, right: 24)
+        view.textContainerInset = UIEdgeInsets(top: 14, left: 24, bottom: 28, right: 24)
         view.textContainer.lineFragmentPadding = 0
         view.delegate = context.coordinator
+        view.onLayout = { [weak view, weak coordinator = context.coordinator] moved in
+            if let view { coordinator?.report(view, moved: moved) }
+        }
+        view.onAutomaticEnd = { [weak view, weak coordinator = context.coordinator] in
+            if let view { coordinator?.report(view, moved: true, automaticEnd: true) }
+        }
         view.replace(text, typography: typography, at: initialOffset)
+        context.coordinator.text = text
         context.coordinator.typography = typography
         return view
     }
 
     func updateUIView(_ view: ReadingTextView, context: Context) {
-        context.coordinator.onOffset = onOffset
-        if context.coordinator.typography != typography {
-            view.replace(text, typography: typography, at: view.anchorOffset)
-            context.coordinator.typography = typography
+        let coordinator = context.coordinator
+        coordinator.onScroll = onScroll
+        coordinator.onAutomaticEnd = onAutomaticEnd
+        let textChanged = coordinator.text != text
+        let typographyChanged = coordinator.typography != typography
+        if textChanged || typographyChanged {
+            view.replace(text, typography: typography, at: textChanged ? initialOffset : view.anchorOffset)
+            coordinator.text = text
+            coordinator.typography = typography
         }
+        if textChanged || typographyChanged || coordinator.highlight != highlight {
+            view.updateHighlight(highlight, palette: typography.palette)
+            coordinator.highlight = highlight
+        }
+        if let request, coordinator.request != request {
+            coordinator.request = request
+            view.seek(to: request.target)
+        }
+        view.setAutomaticSpeed(automaticSpeed)
+    }
+
+    static func dismantleUIView(_ view: ReadingTextView, coordinator: Coordinator) {
+        view.setAutomaticSpeed(nil)
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onOffset: onOffset)
+        Coordinator(onScroll: onScroll, onAutomaticEnd: onAutomaticEnd)
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {
+        var text: String?
         var typography: ReaderTypography?
-        var onOffset: (Int) -> Void
+        var request: ReaderScrollRequest?
+        var highlight: NSRange?
+        var onScroll: (ReaderScrollReport) -> Void
+        var onAutomaticEnd: () -> Void
+        private var lastOffset: Int?
+        private var lastFraction = -1.0
+        private var pendingOffset: Int?
+        private var pendingFraction = 0.0
+        private var pendingEnd = false
+        private var reportScheduled = false
 
-        init(onOffset: @escaping (Int) -> Void) {
-            self.onOffset = onOffset
+        init(onScroll: @escaping (ReaderScrollReport) -> Void, onAutomaticEnd: @escaping () -> Void) {
+            self.onScroll = onScroll
+            self.onAutomaticEnd = onAutomaticEnd
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
-            guard let view = scrollView as? ReadingTextView,
-                  let offset = view.firstVisibleOffset, offset != view.anchorOffset else { return }
+            guard let view = scrollView as? ReadingTextView, let offset = view.firstVisibleOffset else { return }
             view.anchorOffset = offset
-            DispatchQueue.main.async { [weak self, weak view] in
-                guard let self, let view, view.anchorOffset == offset else { return }
-                onOffset(offset)
+            report(view, moved: true)
+        }
+
+        func report(_ view: ReadingTextView, moved: Bool, automaticEnd: Bool = false) {
+            pendingOffset = moved ? view.anchorOffset : nil
+            pendingFraction = view.scrollFraction
+            pendingEnd = pendingEnd || automaticEnd
+            guard !reportScheduled else { return }
+            reportScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                self?.publishReport()
+            }
+        }
+
+        private func publishReport() {
+            reportScheduled = false
+            let changedOffset = pendingOffset != nil && pendingOffset != lastOffset
+            let changedFraction = abs(lastFraction - pendingFraction) >= 0.003
+                || (lastFraction != pendingFraction && (pendingFraction == 0 || pendingFraction == 1))
+            if changedOffset || changedFraction {
+                lastOffset = pendingOffset
+                lastFraction = pendingFraction
+                onScroll(ReaderScrollReport(offset: pendingOffset, fraction: pendingFraction))
+            }
+            if pendingEnd {
+                pendingEnd = false
+                onAutomaticEnd()
             }
         }
     }
@@ -58,12 +137,18 @@ struct ReaderTextPane: UIViewRepresentable {
 
 final class ReadingTextView: UITextView {
     var anchorOffset = 0
-    private var pendingOffset: Int?
-    private var laidOutWidth: CGFloat = 0
+    var onLayout: ((Bool) -> Void)?
+    var onAutomaticEnd: (() -> Void)?
+    private var pendingTarget: ReaderScrollRequest.Target?
+    private var lastLayoutSize: CGSize = .zero
+    private var displayLink: CADisplayLink?
+    private var automaticSpeed: Double?
+    private var highlight: NSRange?
+    private var maximumScroll: CGFloat { max(0, contentSize.height - bounds.height) }
 
     func replace(_ text: String, typography: ReaderTypography, at offset: Int) {
         anchorOffset = offset
-        pendingOffset = offset
+        pendingTarget = .offset(offset)
 
         let fontSize = CGFloat(typography.fontSize)
         let systemFont = UIFont.systemFont(ofSize: fontSize)
@@ -79,19 +164,62 @@ final class ReadingTextView: UITextView {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byWordWrapping
         paragraph.lineSpacing = typography.lineSpacing
-        paragraph.paragraphSpacing = max(4, typography.lineSpacing)
+        paragraph.paragraphSpacing = typography.paragraphSpacing
         tintColor = UIColor(typography.palette.accent)
         indicatorStyle = typography.palette == .night ? .white : .black
-        attributedText = NSAttributedString(string: text, attributes: [
+        let formatted = NSMutableAttributedString(string: text, attributes: [
             .font: font,
             .foregroundColor: UIColor(typography.palette.foreground),
             .paragraphStyle: paragraph
         ])
+        if typography.indentParagraphs {
+            let indented = NSMutableParagraphStyle()
+            indented.setParagraphStyle(paragraph)
+            indented.firstLineHeadIndent = fontSize * 2
+            text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: [.byParagraphs, .substringNotRequired]) {
+                _, range, enclosingRange, _ in
+                guard let first = text[range].first, !first.isWhitespace else { return }
+                formatted.addAttribute(.paragraphStyle, value: indented, range: NSRange(enclosingRange, in: text))
+            }
+        }
+        highlight = nil
+        attributedText = formatted
         setNeedsLayout()
     }
 
+    func updateHighlight(_ range: NSRange?, palette: ReadingPalette) {
+        textStorage.beginEditing()
+        defer { textStorage.endEditing() }
+        if let highlight, NSMaxRange(highlight) <= textStorage.length {
+            textStorage.removeAttribute(.backgroundColor, range: highlight)
+        }
+        highlight = range.flatMap {
+            guard $0.location != NSNotFound else { return nil }
+            let clamped = NSIntersectionRange($0, NSRange(location: 0, length: textStorage.length))
+            return clamped.length > 0 ? clamped : nil
+        }
+        if let highlight {
+            textStorage.addAttribute(
+                .backgroundColor,
+                value: UIColor(palette.accent).withAlphaComponent(0.23),
+                range: highlight
+            )
+        }
+    }
+
+    func seek(to target: ReaderScrollRequest.Target) {
+        pendingTarget = target
+        if case .offset(let offset) = target { anchorOffset = offset }
+        setNeedsLayout()
+    }
+
+    var scrollFraction: Double {
+        guard maximumScroll > 0 else { return 0 }
+        return min(1, max(0, contentOffset.y / maximumScroll))
+    }
+
     var firstVisibleOffset: Int? {
-        guard pendingOffset == nil, laidOutWidth == bounds.width, laidOutWidth > 0, textStorage.length > 0 else {
+        guard pendingTarget == nil, lastLayoutSize == bounds.size, bounds.width > 0, textStorage.length > 0 else {
             return nil
         }
         let point = CGPoint(x: 0, y: max(0, contentOffset.y))
@@ -103,26 +231,92 @@ final class ReadingTextView: UITextView {
     }
 
     override func layoutSubviews() {
-        if laidOutWidth > 0, laidOutWidth != bounds.width, pendingOffset == nil {
-            pendingOffset = anchorOffset
+        let resized = lastLayoutSize != bounds.size
+        if resized && lastLayoutSize != .zero && pendingTarget == nil {
+            pendingTarget = .offset(anchorOffset)
         }
         super.layoutSubviews()
 
-        laidOutWidth = bounds.width
-        guard let offset = pendingOffset, bounds.width > 0, bounds.height > 0,
+        lastLayoutSize = bounds.size
+        guard let target = pendingTarget, bounds.width > 0, bounds.height > 0,
               textStorage.length > 0 else { return }
-        if offset == 0 {
-            setContentOffset(.zero, animated: false)
-            pendingOffset = nil
-            return
+        let y: CGFloat
+        switch target {
+        case .offset(0):
+            y = 0
+        case .offset(let offset):
+            let location = min(max(0, offset), textStorage.length - 1)
+            layoutManager.ensureLayout(forCharacterRange: NSRange(location: location, length: 1))
+            let glyph = layoutManager.glyphIndexForCharacter(at: location)
+            let line = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+            y = min(line.minY, maximumScroll)
+        case .fraction(let fraction):
+            layoutManager.ensureLayout(for: textContainer)
+            y = maximumScroll * min(1, max(0, fraction))
+        case .reveal(let offset):
+            let location = min(max(0, offset), textStorage.length - 1)
+            layoutManager.ensureLayout(forCharacterRange: NSRange(location: location, length: 1))
+            let glyph = layoutManager.glyphIndexForCharacter(at: location)
+            let line = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+            let minVisibleY = contentOffset.y
+            let maxVisibleY = minVisibleY + bounds.height - textContainerInset.top - textContainerInset.bottom
+            if line.minY >= minVisibleY && line.maxY <= maxVisibleY {
+                pendingTarget = nil
+                return
+            }
+            y = min(line.minY, maximumScroll)
         }
+        setContentOffset(CGPoint(x: 0, y: y), animated: false)
+        pendingTarget = nil
+        switch target {
+        case .offset:
+            onLayout?(false)
+        case .fraction, .reveal:
+            if let offset = firstVisibleOffset { anchorOffset = offset }
+            onLayout?(true)
+        }
+    }
 
-        layoutManager.ensureLayout(for: textContainer)
-        let glyph = layoutManager.glyphIndexForCharacter(at: min(offset, textStorage.length - 1))
-        let line = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
-        let maxScroll = max(0, contentSize.height - bounds.height)
-        setContentOffset(CGPoint(x: 0, y: min(line.minY, maxScroll)), animated: false)
-        pendingOffset = nil
+    func setAutomaticSpeed(_ speed: Double?) {
+        guard automaticSpeed != speed else { return }
+        automaticSpeed = speed
+        displayLink?.invalidate()
+        displayLink = nil
+        guard speed != nil else { return }
+
+        let target = AutomaticScrollTarget(view: self)
+        let link = CADisplayLink(target: target, selector: #selector(AutomaticScrollTarget.tick(_:)))
+        link.add(to: .main, forMode: .common)
+        displayLink = link
+    }
+
+    fileprivate func advanceAutomaticScroll(by elapsed: TimeInterval) {
+        guard let automaticSpeed, pendingTarget == nil, !isTracking, !isDragging, !isDecelerating else { return }
+        let delta = min(max(elapsed, 0), 0.05)
+        let end = maximumScroll
+        let next = max(0, contentOffset.y) + automaticSpeed * delta
+        let y = next >= end - 0.5 ? end : next
+        if y != contentOffset.y {
+            setContentOffset(CGPoint(x: 0, y: y), animated: false)
+        }
+        if y >= end {
+            setAutomaticSpeed(nil)
+            onAutomaticEnd?()
+        }
+    }
+
+    private final class AutomaticScrollTarget: NSObject {
+        weak var view: ReadingTextView?
+
+        init(view: ReadingTextView) { self.view = view }
+
+        @objc func tick(_ link: CADisplayLink) {
+            guard let view else {
+                link.invalidate()
+                return
+            }
+            view.advanceAutomaticScroll(by: link.targetTimestamp - link.timestamp)
+        }
     }
 }
 #else
@@ -130,7 +324,11 @@ struct ReaderTextPane: View {
     let text: String
     let typography: ReaderTypography
     let initialOffset: Int
-    let onOffset: (Int) -> Void
+    let request: ReaderScrollRequest?
+    let highlight: NSRange?
+    let automaticSpeed: Double?
+    let onScroll: (ReaderScrollReport) -> Void
+    let onAutomaticEnd: () -> Void
 
     var body: some View {
         ScrollView {

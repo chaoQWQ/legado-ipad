@@ -161,7 +161,7 @@ public struct BookSourceClient: Sendable {
         return chapters
     }
 
-    public func content(of chapter: SourceChapter, in source: BookSource) async throws -> String {
+    public func content(of chapter: SourceChapter, in source: BookSource, bypassCache: Bool = false) async throws -> String {
         try check(source)
         guard let rule = source.contentRule, let content = rule.content?.nilIfBlank else {
             throw BookSourceError.missingRule("正文")
@@ -173,7 +173,7 @@ public struct BookSourceClient: Sendable {
         var totalBytes = 0
         var traversal = Pagination(start: chapter.request)
         while let request = try traversal.next() {
-            let page = try await load(request, in: source)
+            let page = try await load(request, in: source, bypassCache: bypassCache)
             let main = try readableHTML(page.root.string(content, field: "正文"))
             let supplement = try readableHTML(page.root.string(rule.subContent, field: "副文"))
             let text = [main, supplement].filter { !$0.isEmpty }.joined(separator: "\n\n")
@@ -211,8 +211,13 @@ public struct BookSourceClient: Sendable {
         guard response.expectedContentLength <= responseLimit else { throw BookSourceError.responseTooLarge }
     }
 
-    private func load(_ request: SourceRequest, in source: BookSource) async throws -> Page {
-        let (data, response) = try await transport(request.request(sourceHeaders: source.headers), source.usesCookies)
+    private func load(_ request: SourceRequest, in source: BookSource, bypassCache: Bool = false) async throws -> Page {
+        var urlRequest = try request.request(sourceHeaders: source.headers)
+        if bypassCache {
+            urlRequest.cachePolicy = .reloadIgnoringLocalCacheData
+            urlRequest.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        }
+        let (data, response) = try await transport(urlRequest, source.usesCookies)
         try Self.check(response)
         guard data.count <= Self.responseLimit else { throw BookSourceError.responseTooLarge }
         guard let url = response.url, let text = Self.responseText(data, response: response) else {
