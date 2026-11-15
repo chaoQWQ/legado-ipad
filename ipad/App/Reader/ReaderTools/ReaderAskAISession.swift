@@ -12,6 +12,7 @@ final class ReaderAskAISession: ObservableObject {
 
     @Published private(set) var history = ReaderAskAIHistory()
     @Published private(set) var conversationID: UUID?
+    @Published private(set) var reviewedConversationID: UUID?
     @Published private(set) var choice: ReaderAIModelChoice?
     @Published private(set) var choices: [ReaderAIModelChoice] = []
     @Published private(set) var availableSkills: [ReaderAISkill] = []
@@ -20,6 +21,7 @@ final class ReaderAskAISession: ObservableObject {
     @Published private(set) var selectedMCPIDs: Set<String> = []
     @Published private(set) var returnToSend = true
     @Published private(set) var showsThinkingToolbar = true
+    @Published var allowsExternalTools = false
     @Published private(set) var toolActivity: [ToolActivity] = []
     @Published private(set) var historyError: String?
     @Published private(set) var settingsError: String?
@@ -47,12 +49,14 @@ final class ReaderAskAISession: ObservableObject {
         self.bookID = bookID
         self.context = context
         self.isGeneral = isGeneral
-        self.draft = context.excerpt.isEmpty ? "" : ReaderAskAIContext.defaultQuestion
+        self.draft = context.initialQuestion
         self.selectedSkillIDs = initialSkillIDs
         self.selectedMCPIDs = initialMCPIDs
     }
 
-    var conversation: ReaderAskAIConversation? { history.conversation(conversationID) }
+    var conversation: ReaderAskAIConversation? { history.conversation(reviewedConversationID ?? conversationID) }
+    var isReviewingHistory: Bool { reviewedConversationID != nil }
+    var usesReadingSnapshot: Bool { context.readingContext != nil }
     var isRequesting: Bool { pendingTurnID != nil }
     var hasDraft: Bool { !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     var destination: String? {
@@ -66,7 +70,7 @@ final class ReaderAskAISession: ObservableObject {
         loaded = true
         do {
             history = try ReaderAskAIHistory.load(for: bookID)
-            conversationID = history.conversation(history.currentID)?.id
+            if !usesReadingSnapshot { conversationID = history.conversation(history.currentID)?.id }
         } catch {
             historyError = "无法打开本书的问 AI 历史。此面板的对话将临时保留。"
         }
@@ -123,14 +127,15 @@ final class ReaderAskAISession: ObservableObject {
     }
 
     func send() {
-        guard !isRequesting, let choice, destination != nil else { return }
+        guard !isReviewingHistory, !isRequesting, let choice, destination != nil else { return }
         let question = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty else { return }
         draft = ""
-        let turn = ReaderAskAITurn(question: question, context: context)
+        let turn = ReaderAskAITurn(question: question, context: context, usedExternalTools: allowsExternalTools)
         var id = UUID()
         changeHistory { history in
-            var conversation = history.conversation(conversationID) ?? ReaderAskAIConversation(id: id)
+            let existing = history.conversation(conversationID).flatMap { belongsToReadingSnapshot($0) ? $0 : nil }
+            var conversation = existing ?? ReaderAskAIConversation(id: id)
             conversation.turns.append(turn)
             conversation.updatedAt = .now
             history.update(conversation)
@@ -141,15 +146,20 @@ final class ReaderAskAISession: ObservableObject {
         request(turnID: turn.id, using: choice)
     }
 
+    func hasRetryContext(for turn: ReaderAskAITurn) -> Bool {
+        !isReviewingHistory && context.matchesReadingSnapshot(turn.context)
+    }
+
     func retry(_ turnID: UUID) {
-        guard !isRequesting, let choice, destination != nil, let conversationID,
-              conversation?.turns.last?.id == turnID else { return }
+        guard let choice, let conversationID, let turn = conversation?.turns.last,
+              turn.id == turnID, hasRetryContext(for: turn), !isRequesting, destination != nil else { return }
         changeHistory { history in
             guard var conversation = history.conversation(conversationID),
                   let index = conversation.turns.indices.last, conversation.turns[index].id == turnID else { return }
             conversation.turns[index].status = .waiting
             conversation.turns[index].answer = ""
             conversation.turns[index].error = nil
+            conversation.turns[index].usedExternalTools = allowsExternalTools
             conversation.updatedAt = .now
             history.update(conversation)
         }
@@ -167,10 +177,15 @@ final class ReaderAskAISession: ObservableObject {
         toolActivity = []
         changeHistory { $0.currentID = nil }
         conversationID = nil
-        draft = context.excerpt.isEmpty ? "" : ReaderAskAIContext.defaultQuestion
+        reviewedConversationID = nil
+        draft = usesReadingSnapshot ? "" : context.initialQuestion
     }
 
     func openConversation(_ id: UUID) {
+        if usesReadingSnapshot {
+            reviewedConversationID = history.conversation(id)?.id
+            return
+        }
         guard id != conversationID else { return }
         stop()
         toolActivity = []
@@ -181,13 +196,16 @@ final class ReaderAskAISession: ObservableObject {
         draft = ""
     }
 
+    func closeHistoryPreview() { reviewedConversationID = nil }
+
     func deleteConversation(_ id: UUID) {
         if id == conversationID { stop() }
         changeHistory { history in
             history.conversations.removeAll { $0.id == id }
             if history.currentID == id { history.currentID = history.conversations.first?.id }
         }
-        if conversationID == id { conversationID = history.currentID }
+        if conversationID == id { conversationID = usesReadingSnapshot ? nil : history.currentID }
+        if reviewedConversationID == id { closeHistoryPreview() }
     }
 
     func clearHistory() {
@@ -195,17 +213,24 @@ final class ReaderAskAISession: ObservableObject {
         toolActivity = []
         changeHistory { $0 = ReaderAskAIHistory() }
         conversationID = nil
+        reviewedConversationID = nil
+    }
+
+    private func belongsToReadingSnapshot(_ conversation: ReaderAskAIConversation) -> Bool {
+        guard let last = conversation.turns.last else { return true }
+        return context.matchesReadingSnapshot(last.context)
     }
 
     private func request(turnID: UUID, using choice: ReaderAIModelChoice) {
-        guard let conversation, conversation.turns.last?.id == turnID else { return }
+        guard let conversation, let turn = conversation.turns.last, turn.id == turnID else { return }
         let messages = conversation.requestMessages(prompt: askPrompt)
-        let activeSkills = availableSkills.filter { selectedSkillIDs.contains($0.id) }
-        let servers = availableMCPServers.filter { selectedMCPIDs.contains($0.id) }
-        let native = ReaderAINativeTools.selected(
+        let canUseTools = !usesReadingSnapshot || turn.usedExternalTools == true
+        let activeSkills = canUseTools ? availableSkills.filter { selectedSkillIDs.contains($0.id) } : []
+        let servers = canUseTools ? availableMCPServers.filter { selectedMCPIDs.contains($0.id) } : []
+        let native = canUseTools ? ReaderAINativeTools.selected(
             for: conversation.id, library: library, scope: isGeneral ? .enabled : readToolScope,
             disabled: disabledNativeTools, tavily: tavily
-        )
+        ).filter { !usesReadingSnapshot || !ReaderAILibraryTools.names.contains($0.name) } : []
         let limit = toolRoundLimit
         let requestID = UUID()
         self.requestID = requestID

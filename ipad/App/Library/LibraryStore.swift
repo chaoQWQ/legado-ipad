@@ -211,6 +211,8 @@ final class LibraryStore: ObservableObject {
             defaults.removeObject(forKey: key)
         }
         defaults.removeObject(forKey: ReaderReplacementRule.storageKey(bookID: id))
+        ReaderReadCoverage.shared.remove(bookID: id)
+        try? await ReaderChapterArt.shared.remove(bookID: id)
         await files.removeBook(id)
     }
 

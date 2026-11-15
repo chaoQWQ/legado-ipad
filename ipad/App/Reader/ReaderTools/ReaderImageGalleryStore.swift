@@ -13,6 +13,14 @@ struct ReaderImageContext: Codable, Equatable, Sendable {
     let originalOffset: Int?
     var sourceID: String? = nil
     var paragraphText: String? = nil
+    var sourceName: String? = nil
+    var readingOffset: Int? = nil
+    var chapterLength: Int? = nil
+
+    var readingProgress: Double? {
+        guard let readingOffset, let chapterLength, chapterLength > 0 else { return nil }
+        return Double(min(max(0, readingOffset), chapterLength)) / Double(chapterLength)
+    }
 
     var canInsert: Bool {
         bookID != nil && chapterIndex >= 0 && (originalOffset ?? -1) >= 0

@@ -156,7 +156,9 @@ enum ReaderAIClient {
         return result
     }
 
-    static func generateImage(prompt: String, provider: ReaderAIImageProvider) async throws -> Data {
+    static func generateImage(
+        prompt: String, provider: ReaderAIImageProvider, singleImage: Bool = false
+    ) async throws -> Data {
         let params = try provider.parameters()
         let usesResponses = provider.usesResponses(parameters: params)
         let model = provider.resolvedModel(parameters: params)
@@ -184,6 +186,7 @@ enum ReaderAIClient {
             ]
             let reserved: Set<String> = ["endpoint", "model", "prompt", "tool", "response"]
             payload.merge(params.filter { !reserved.contains($0.key) }) { _, new in new }
+            if singleImage { payload["n"] = 1 }
             body = payload
         }
 

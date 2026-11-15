@@ -40,13 +40,16 @@ struct LibraryReadingSession: View {
             bookID: book.id,
             title: book.title,
             author: book.author,
-            chapters: book.chapters.map { ReaderChapter(title: $0.title) },
+            chapters: book.chapters.map {
+                ReaderChapter(title: $0.title, identity: "\(book.readerIdentity)|\($0.online?.id ?? "")")
+            },
             initialPosition: library.position(for: book.id),
             loadChapter: { index in try await library.chapter(in: book, at: index) },
             onProgress: { library.savePosition($0, for: book) },
             cachedChapter: { index in try await library.cachedChapter(in: book, at: index) },
             online: onlineActions(for: book),
             sourceID: book.sourceID,
+            readingIdentity: book.readerIdentity,
             bookmarkKey: book.readerBookmarkKey
         )
     }

@@ -8,7 +8,13 @@ final class ReaderPagingViewport: UIView, UIGestureRecognizerDelegate {
     var onChapterTurn: (ReaderPageDirection) -> Void = { _ in }
     var onToggleControls: () -> Void = {}
     var onUserPageTurn: () -> Void = {}
+    var onReadingViewportChanged: () -> Void = {}
     private(set) var mode: ReaderPageMode = .scroll
+
+    var visibleReadingRange: NSRange? {
+        guard window != nil, !isHidden, request == nil, turnAnimation == nil, drag == nil else { return nil }
+        return mode == .scroll ? textView.visibleReadingRange : currentPage?.characters
+    }
 
     private let pageMask = CAShapeLayer()
     private var pages: ReaderPageLayout?
@@ -57,6 +63,11 @@ final class ReaderPagingViewport: UIView, UIGestureRecognizerDelegate {
 
     required init?(coder: NSCoder) { nil }
 
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        onReadingViewportChanged()
+    }
+
     func configure(mode: ReaderPageMode, animationDuration: Double, interaction: ReaderInteractionPreferences,
                    columnWidth: CGFloat? = nil) {
         self.animationDuration = animationDuration
@@ -66,6 +77,7 @@ final class ReaderPagingViewport: UIView, UIGestureRecognizerDelegate {
             cancelAnimation()
             pages = nil
             setNeedsLayout()
+            onReadingViewportChanged()
         }
         if textView.isSelectable != interaction.allowsTextSelection {
             textView.isSelectable = interaction.allowsTextSelection
@@ -97,6 +109,7 @@ final class ReaderPagingViewport: UIView, UIGestureRecognizerDelegate {
             installAccessibilityActions()
         }
         setNeedsLayout()
+        onReadingViewportChanged()
     }
 
     func replace(_ text: String, typography: ReaderTypography, at offset: Int, images: [ReaderDisplayImage] = []) {
@@ -106,6 +119,7 @@ final class ReaderPagingViewport: UIView, UIGestureRecognizerDelegate {
         pages = nil
         currentPage = nil
         setNeedsLayout()
+        onReadingViewportChanged()
     }
 
     func seek(to target: ReaderScrollRequest.Target) {
@@ -129,13 +143,17 @@ final class ReaderPagingViewport: UIView, UIGestureRecognizerDelegate {
             request = target
             setNeedsLayout()
         }
+        onReadingViewportChanged()
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
         let resized = pageSize != bounds.size
         pageSize = bounds.size
-        if resized { cancelAnimation() }
+        if resized {
+            cancelAnimation()
+            onReadingViewportChanged()
+        }
         let width = min(bounds.width, columnWidth ?? bounds.width)
         textView.frame = CGRect(x: bounds.midX - width / 2, y: bounds.minY, width: width, height: bounds.height)
         textView.layoutIfNeeded()
@@ -206,6 +224,7 @@ final class ReaderPagingViewport: UIView, UIGestureRecognizerDelegate {
         )).cgPath
         CATransaction.commit()
         textView.accessibilityValue = (textView.textStorage.string as NSString).substring(with: page.characters)
+        onReadingViewportChanged()
     }
 
     @discardableResult
@@ -309,6 +328,7 @@ final class ReaderPagingViewport: UIView, UIGestureRecognizerDelegate {
             let originY = recognizer.location(in: self).y - translation.y
             let cornerAtTop = direction == .next && originY < bounds.midY
             drag = PageDrag(direction: direction, cornerAtTop: cornerAtTop)
+            onReadingViewportChanged()
             textView.setAutomaticSpeed(nil)
             onUserPageTurn()
             let index = pageIndex + (direction == .next ? 1 : -1)
@@ -322,6 +342,7 @@ final class ReaderPagingViewport: UIView, UIGestureRecognizerDelegate {
             guard let drag else { return }
             updateDrag(translation)
             self.drag = nil
+            onReadingViewportChanged()
             let threshold = interaction.swipeThreshold > 0
                 ? min(bounds.width * 0.65, interaction.swipeThreshold)
                 : 24
@@ -335,6 +356,7 @@ final class ReaderPagingViewport: UIView, UIGestureRecognizerDelegate {
         case .cancelled, .failed:
             if drag != nil {
                 drag = nil
+                onReadingViewportChanged()
                 settleAnimation(advances: false)
             }
         default: break
@@ -386,6 +408,7 @@ final class ReaderPagingViewport: UIView, UIGestureRecognizerDelegate {
         addSubview(overlay)
         overlay.update(progress: 0, lift: 0)
         turnAnimation = TurnAnimation(overlay: overlay, target: targetPage, index: index)
+        onReadingViewportChanged()
         return true
     }
 
@@ -401,6 +424,7 @@ final class ReaderPagingViewport: UIView, UIGestureRecognizerDelegate {
             self.turnAnimation = nil
             if advances { self.commit(completed.target, index: completed.index) }
             overlay.removeFromSuperview()
+            self.onReadingViewportChanged()
         }
     }
 

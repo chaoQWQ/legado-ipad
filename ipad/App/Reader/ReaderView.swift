@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ReaderChapter {
     let title: String
+    var identity: String? = nil
 }
 
 struct ReaderPosition: Codable, Equatable {
@@ -12,6 +13,7 @@ struct ReaderPosition: Codable, Equatable {
 struct ReaderView: View {
     let bookID: UUID
     let sourceID: String?
+    let readingIdentity: String?
     let title: String
     let author: String
     let chapters: [ReaderChapter]
@@ -36,6 +38,7 @@ struct ReaderView: View {
     @StateObject private var speech = ReaderSpeechController()
     @StateObject private var displayEffects = ReaderDisplayEffects()
     @ObservedObject private var imageGallery = ReaderImageGalleryStore.shared
+    @ObservedObject private var chapterArt = ReaderChapterArt.shared
     @State private var chapterIndex: Int
     @State private var offset: Int
     @State private var content: ChapterContent?
@@ -51,7 +54,12 @@ struct ReaderView: View {
     @State private var selectedTextForTool = ""
     @State private var readerAISkillIDs: Set<String> = []
     @State private var readerAIMCPIDs: Set<String> = []
+    @State private var manualReadingContext: ReaderAskAIReadingContext?
+    @State private var manualContextRequest: UUID?
     @State private var selectedImageContext: ReaderImageContext?
+    @State private var selectedImageAnchor: RecapAnchor?
+    @State private var revealedChapterArt: ReaderChapterArtKey?
+    @State private var recapAnchor: RecapAnchor?
     @State private var saveTask: Task<Void, Never>?
     @State private var savedPosition: ReaderPosition?
     @State private var chapterPreview: Int?
@@ -68,10 +76,12 @@ struct ReaderView: View {
         cachedChapter: @escaping (Int) async throws -> String? = { _ in nil },
         online: ReaderOnlineActions? = nil,
         sourceID: String? = nil,
+        readingIdentity: String? = nil,
         bookmarkKey: String? = nil
     ) {
         self.bookID = bookID
         self.sourceID = sourceID
+        self.readingIdentity = readingIdentity
         self.title = title
         self.author = author
         self.chapters = chapters
@@ -144,6 +154,13 @@ struct ReaderView: View {
     private var chapterTitle: String {
         chapters.indices.contains(chapterIndex) ? titleScript.convert(chapters[chapterIndex].title) : ""
     }
+    private var coverageSource: String? { readingIdentity ?? sourceID }
+    private var chapterArtEnabled: Bool { chapterArt.isEnabled(for: bookID) }
+    private var fullscreenReading: Bool { scenePhase == .active && activeSheet == nil && !showsTray }
+    private var loadedArtKey: ReaderChapterArtKey? {
+        guard content?.index == chapterIndex, hasBody else { return nil }
+        return artKey(for: chapterIndex)
+    }
 
     var body: some View {
         let request = ChapterRequest(index: chapterIndex, attempt: attempt)
@@ -200,6 +217,7 @@ struct ReaderView: View {
             .onChange(of: replacementData) { _, _ in applyReplacements() }
             .onChange(of: effectiveScript) { _, _ in applyReplacements() }
             .onChange(of: inlineImages(in: chapterIndex)) { _, _ in applyReplacements() }
+            .onChange(of: loadedArtKey) { _, _ in prepareNextChapterArt() }
             .onChange(of: layout.turnMode) { _, _ in finishAutomaticScroll() }
             .onChange(of: theme) { _, newTheme in
                 if newTheme != .night { lastLightTheme = newTheme }
@@ -209,6 +227,10 @@ struct ReaderView: View {
                 if phase != .active {
                     automaticScroll = false
                     saveProgress()
+                    ReaderReadCoverage.shared.flush(bookID: bookID)
+                    chapterArt.leave(bookID)
+                } else {
+                    prepareNextChapterArt()
                 }
             }
             .onChange(of: behavior.orientation) { _, orientation in displayEffects.setOrientation(orientation) }
@@ -222,6 +244,8 @@ struct ReaderView: View {
                 automaticScroll = false
                 speech.stop()
                 saveProgress()
+                ReaderReadCoverage.shared.flush(bookID: bookID)
+                chapterArt.leave(bookID)
             }
             .alert("无法刷新章节", isPresented: Binding(
                 get: { refreshError != nil },
@@ -236,6 +260,11 @@ struct ReaderView: View {
     @ToolbarContentBuilder
     private var readerToolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
+            Button(action: showRecap) {
+                Label("上次读到哪", systemImage: "clock.arrow.circlepath")
+            }
+            .disabled(!hasBody)
+
             if online != nil {
                 Button {
                     present(.changeSource)
@@ -271,6 +300,10 @@ struct ReaderView: View {
                     )
                 }
                 .disabled(content?.text.isEmpty != false)
+
+                Button("问 AI", systemImage: "sparkles") { openChapterAI() }
+                    .disabled(!hasBody)
+                Button("章首插画设置", systemImage: "photo") { present(.chapterArtSettings) }
 
                 Button {
                     toggleControls()
@@ -320,10 +353,22 @@ struct ReaderView: View {
             ReaderAskAIPanel(
                 bookID: bookID, bookTitle: titleScript.convert(title), author: author,
                 sourceName: online?.sourceName, chapterTitle: chapterTitle, excerpt: selectedTextForTool,
+                readingContext: manualReadingContext,
                 selectedSkillIDs: $readerAISkillIDs, selectedMCPIDs: $readerAIMCPIDs
             )
         case .generateImage:
-            if let selectedImageContext { ReaderImageGenerationView(context: selectedImageContext) }
+            if let selectedImageContext, let anchor = selectedImageAnchor {
+                ReaderImageGenerationView(context: selectedImageContext, precedingReadText: {
+                    await recapExcerpts(for: anchor, maximumCount: 3, maximumLength: 2_400)
+                        .map(\.text).joined(separator: "\n\n")
+                })
+            }
+        case .recap:
+            if let anchor = recapAnchor {
+                ReaderRecapSheet(throughLabel: anchor.label, loadExcerpts: { await recapExcerpts(for: anchor) })
+            }
+        case .chapterArtSettings:
+            chapterArtSettings
         case .replace:
             ReaderReplaceSheet(rules: Binding(
                 get: { ReaderReplacementRule.decode(replacementData) },
@@ -379,7 +424,7 @@ struct ReaderView: View {
                             bottomMargin: layout.bottomMargin,
                             justifiesText: behavior.justifiesText
                         ),
-                        initialOffset: content.transform.displayOffset(forOriginal: offset),
+                        initialOffset: content.transform.displayOffset(forOriginal: offset, beforeInlineImages: offset == 0),
                         request: request,
                         highlight: displayHighlight(in: content),
                         automaticSpeed: automaticScroll && !isPaged ? behavior.automaticSpeed : nil,
@@ -407,6 +452,10 @@ struct ReaderView: View {
                         onUserPageTurn: prepareManualPageTurn,
                         onSelectionAction: { action, selection in
                             useSelection(action, selection: selection, in: content)
+                        },
+                        tracksReading: fullscreenReading,
+                        onReadVisibleRange: { displayRange in
+                            recordVisibleReading(displayRange, in: content, request: request)
                         }
                     )
                     .id(content.id)
@@ -429,7 +478,16 @@ struct ReaderView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .safeAreaInset(edge: .top, spacing: 0) {
-            if !chapters.isEmpty && hasChapterHeader { chapterHeader }
+            VStack(spacing: 0) {
+                if !chapters.isEmpty && hasChapterHeader { chapterHeader }
+                if offset == 0, let content, content.index == chapterIndex, let key = loadedArtKey {
+                    let status = chapterArt.status(for: key, textFingerprint: content.artFingerprint)
+                    let showsArtwork = if case .ready = status { true } else { chapterArtEnabled }
+                    if showsArtwork {
+                        chapterArtBar(for: key, status: status, content: content)
+                    }
+                }
+            }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if !chapters.isEmpty && information.showsReadingProgress {
@@ -725,6 +783,133 @@ struct ReaderView: View {
         activeSheet = sheet
     }
 
+    private func recordVisibleReading(_ displayRange: NSRange, in content: ChapterContent, request: ReaderScrollRequest?) {
+        guard fullscreenReading, self.content?.id == content.id, scrollRequest == request else { return }
+        for range in content.transform.originalReadingRanges(forDisplay: displayRange) {
+            ReaderReadCoverage.shared.record(
+                bookID: bookID, sourceID: coverageSource, chapterIndex: content.index,
+                fingerprint: content.fingerprint, range: range
+            )
+        }
+    }
+
+    private func showRecap() {
+        guard let content, content.index == chapterIndex,
+              let paragraph = ReaderReadCoverage.paragraph(in: content.text, at: offset) else { return }
+        let label = chapterTitle.isEmpty ? "第 \(chapterIndex + 1) 章当前段落" : "「\(chapterTitle)」当前段落"
+        recapAnchor = RecapAnchor(chapter: content, end: NSMaxRange(paragraph), label: label)
+        present(.recap)
+    }
+
+    @MainActor
+    private func recapExcerpts(
+        for anchor: RecapAnchor, maximumCount: Int = 8, maximumLength: Int = 6_000
+    ) async -> [ReaderRecapExcerpt] {
+        let coverage = ReaderReadCoverage.shared
+        let indexes = coverage.chapterIndexes(bookID: bookID, sourceID: coverageSource)
+            .filter { $0 <= anchor.chapter.index && chapters.indices.contains($0) }
+        var excerpts: [ReaderRecapExcerpt] = []
+        var remaining = maximumLength
+
+        for index in indexes.reversed().prefix(24) {
+            guard !Task.isCancelled, remaining > 0, excerpts.count < maximumCount else { break }
+            let text: String
+            let fingerprint: ReaderReadCoverage.Fingerprint
+            let end: Int
+            if index == anchor.chapter.index {
+                text = anchor.chapter.text
+                fingerprint = anchor.chapter.fingerprint
+                end = anchor.end
+            } else {
+                guard let cached = try? await cachedChapter(index) else { continue }
+                text = cached
+                fingerprint = ReaderReadCoverage.fingerprint(of: cached)
+                end = cached.utf16.count
+            }
+            let chapterLabel = titleScript.convert(chapters[index].title)
+            let ranges = coverage.ranges(
+                bookID: bookID, sourceID: coverageSource, chapterIndex: index, fingerprint: fingerprint
+            )
+            for range in ranges.reversed() {
+                guard remaining > 0, excerpts.count < maximumCount else { break }
+                let upper = min(NSMaxRange(range), end)
+                guard upper > range.location else { continue }
+                let limit = min(remaining, 1_600)
+                guard let excerpt = ReaderContextText.excerpt(
+                    in: text, from: max(range.location, upper - limit), to: upper
+                ) else { continue }
+                remaining -= excerpt.utf16.count
+                excerpts.append(ReaderRecapExcerpt(chapterIndex: index, chapterTitle: chapterLabel, text: excerpt))
+            }
+        }
+        return Array(excerpts.reversed())
+    }
+
+    private func artKey(for index: Int) -> ReaderChapterArtKey? {
+        guard chapters.indices.contains(index) else { return nil }
+        return ReaderChapterArtKey(
+            bookID: bookID, sourceID: sourceID, chapterIndex: index, chapterTitle: chapters[index].title,
+            chapterIdentity: chapters[index].identity
+        )
+    }
+
+    private func prepareNextChapterArt() {
+        guard chapterArtEnabled, scenePhase == .active, let current = loadedArtKey else { return }
+        guard let next = artKey(for: current.chapterIndex + 1) else {
+            chapterArt.leave(bookID)
+            return
+        }
+        chapterArt.prepareNext(key: next, loadText: { try await loadChapter(next.chapterIndex) })
+    }
+
+    private var chapterArtSettings: some View {
+        ReaderChapterArtworkSettings(
+            enabled: Binding(get: { chapterArtEnabled }, set: { enabled in
+                chapterArt.setEnabled(enabled, for: bookID)
+                if enabled { prepareNextChapterArt() }
+            })
+        )
+    }
+
+    private func chapterArtBar(
+        for key: ReaderChapterArtKey, status: ReaderChapterArt.Status, content: ChapterContent
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            switch status {
+            case .idle:
+                Button("生成本章插画", systemImage: "photo") {
+                    chapterArt.generateCurrent(key: key, chapterText: content.text)
+                }
+            case .generating:
+                ProgressView("正在生成本章插画")
+                    .controlSize(.small)
+            case .ready:
+                let revealed = revealedChapterArt == key
+                Button(revealed ? "收起本章插画" : "查看本章插画", systemImage: revealed ? "eye.slash" : "photo") {
+                    revealedChapterArt = revealed ? nil : key
+                }
+                if !revealed {
+                    Text("可能包含本章关键剧情")
+                        .foregroundStyle(palette.foreground.opacity(0.66))
+                }
+            case .failed(let message):
+                Button("重试生成本章插画", systemImage: "arrow.clockwise") {
+                    chapterArt.generateCurrent(key: key, chapterText: content.text)
+                }
+                Text(message)
+                    .foregroundStyle(palette.foreground.opacity(0.66))
+                    .lineLimit(2)
+            }
+        }
+        .font(.footnote)
+        .buttonStyle(.borderless)
+        .frame(maxWidth: layout.columnWidth.maxWidth, alignment: .leading)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity)
+        .background(palette.background)
+    }
+
     private func useSelection(_ action: ReaderSelectionAction, selection: ReaderTextSelection, in content: ChapterContent) {
         guard self.content?.id == content.id else { return }
         displayEffects.noteActivity()
@@ -733,20 +918,8 @@ struct ReaderView: View {
         switch action {
         case .searchBook: present(.search)
         case .searchWeb: present(.webSearch)
-        case .askAI: present(.askAI)
-        case .generateImage:
-            let original = content.text as NSString
-            let selectedEnd = content.transform.originalOffset(forDisplay: max(NSMaxRange(selection.range) - 1, 0))
-            let paragraph = original.paragraphRange(for: NSRange(
-                location: min(selectedEnd, max(0, original.length - 1)), length: 0
-            ))
-            selectedImageContext = ReaderImageContext(
-                bookID: bookID, bookTitle: titleScript.convert(title), author: author,
-                chapterIndex: content.index, chapterTitle: chapterTitle, sourceText: selection.text,
-                originalOffset: NSMaxRange(paragraph), sourceID: sourceID,
-                paragraphText: String(original.substring(with: paragraph).prefix(1200))
-            )
-            present(.generateImage)
+        case .askAI, .generateImage:
+            openSelectionAI(action, selection: selection, in: content)
         case .readAloud:
             speech.start(text: selection.text, utf16Offset: 0)
         case .bookmark:
@@ -754,6 +927,58 @@ struct ReaderView: View {
             let position = ReaderPosition(chapterIndex: content.index, offset: originalOffset)
             guard !bookmarks.contains(where: { $0.position == position }) else { return }
             bookmarkData = ReaderBookmarks.encode([ReaderBookmark(position: position, text: content.text)] + bookmarks)
+        }
+    }
+
+    private func openSelectionAI(_ action: ReaderSelectionAction, selection: ReaderTextSelection, in content: ChapterContent) {
+        let location = content.transform.originalOffset(forDisplay: selection.range.location)
+        openReadingAI(action, excerpt: selection.text, location: location, displayLocation: selection.range.location, in: content)
+    }
+
+    private func openChapterAI() {
+        guard let content, content.index == chapterIndex else { return }
+        openReadingAI(.askAI, excerpt: "", location: offset, displayLocation: content.transform.displayOffset(forOriginal: offset),
+                      in: content)
+    }
+
+    private func openReadingAI(
+        _ action: ReaderSelectionAction, excerpt: String, location: Int, displayLocation: Int, in content: ChapterContent
+    ) {
+        finishAutomaticScroll()
+        guard let paragraph = ReaderReadCoverage.paragraph(in: content.text, at: location),
+              let visible = ReaderReadCoverage.paragraph(in: content.transform.text, at: displayLocation) else {
+            return
+        }
+        let paragraphText = ReaderContextText.excerpt(
+            in: content.transform.text, from: visible.location, to: min(NSMaxRange(visible), visible.location + 1_600)
+        )?.replacingOccurrences(of: "\u{FFFC}", with: "") ?? ""
+        let earlier = RecapAnchor(chapter: content, end: paragraph.location, label: chapterTitle)
+        switch action {
+        case .askAI:
+            let request = UUID()
+            manualContextRequest = request
+            Task { @MainActor in
+                let excerpts = await recapExcerpts(for: earlier, maximumCount: 3, maximumLength: 3_400)
+                guard manualContextRequest == request, self.content?.id == content.id, activeSheet == nil else { return }
+                selectedTextForTool = excerpt
+                manualReadingContext = ReaderAskAIReadingContext(
+                    chapterIndex: content.index, chapterCount: chapters.count, offset: location,
+                    chapterLength: content.textLength, paragraph: paragraphText, preceding: excerpts.map(\.text)
+                )
+                present(.askAI)
+            }
+        case .generateImage:
+            manualContextRequest = nil
+            selectedImageAnchor = earlier
+            selectedImageContext = ReaderImageContext(
+                bookID: bookID, bookTitle: titleScript.convert(title), author: author,
+                chapterIndex: content.index, chapterTitle: chapterTitle, sourceText: excerpt,
+                originalOffset: NSMaxRange(paragraph), sourceID: sourceID, paragraphText: paragraphText,
+                sourceName: online?.sourceName, readingOffset: location, chapterLength: content.textLength
+            )
+            present(.generateImage)
+        default:
+            break
         }
     }
 
@@ -825,7 +1050,9 @@ struct ReaderView: View {
         if automaticScroll { finishAutomaticScroll() }
         highlight = nil
         let targetOffset = Int((min(1, max(0, fraction)) * Double(content.textLength)).rounded())
-        scrollRequest = ReaderScrollRequest(target: .offset(content.transform.displayOffset(forOriginal: targetOffset)))
+        scrollRequest = ReaderScrollRequest(target: .offset(content.transform.displayOffset(
+            forOriginal: targetOffset, beforeInlineImages: targetOffset == 0
+        )))
         updateReadingOffset(targetOffset)
     }
 
@@ -844,7 +1071,9 @@ struct ReaderView: View {
         errorMessage = nil
         if let content, content.index == index {
             offset = min(max(0, position.offset), content.textLength)
-            scrollRequest = ReaderScrollRequest(target: .offset(content.transform.displayOffset(forOriginal: offset)))
+            scrollRequest = ReaderScrollRequest(target: .offset(content.transform.displayOffset(
+                forOriginal: offset, beforeInlineImages: offset == 0
+            )))
             saveProgress()
             return
         }
@@ -900,15 +1129,19 @@ struct ReaderView: View {
 
     private func setContent(_ text: String, at index: Int, offset requestedOffset: Int) {
         let textLength = text.utf16.count
+        let fingerprint = ReaderReadCoverage.fingerprint(of: text)
+        let artFingerprint = ReaderChapterArt.fingerprint(of: text)
         offset = min(max(0, requestedOffset), textLength)
         scrollRequest = nil
         content = ChapterContent(
             index: index,
             text: text,
             textLength: textLength,
+            fingerprint: fingerprint,
+            artFingerprint: artFingerprint,
             transform: ReaderTextTransform(
                 original: text, rules: ReaderReplacementRule.decode(replacementData), script: effectiveScript,
-                images: inlineImages(in: index)
+                images: inlineImages(in: index, textFingerprint: artFingerprint)
             )
         )
         saveProgress()
@@ -921,11 +1154,17 @@ struct ReaderView: View {
         setContent(content.text, at: content.index, offset: offset)
     }
 
-    private func inlineImages(in chapterIndex: Int) -> [ReaderInlineImage] {
-        imageGallery.insertedImages(bookID: bookID, chapterIndex: chapterIndex).compactMap { entry in
+    private func inlineImages(in chapterIndex: Int, textFingerprint: String? = nil) -> [ReaderInlineImage] {
+        var images: [ReaderInlineImage] = imageGallery.insertedImages(bookID: bookID, chapterIndex: chapterIndex).compactMap { entry in
             guard entry.context.sourceID == sourceID, let offset = entry.context.originalOffset else { return nil }
             return ReaderInlineImage(originalOffset: offset, url: imageGallery.fileURL(for: entry))
         }
+        let fingerprint = textFingerprint ?? (content?.index == chapterIndex ? content?.artFingerprint : nil)
+        if let key = artKey(for: chapterIndex), revealedChapterArt == key,
+           let fingerprint, case let .ready(url) = chapterArt.status(for: key, textFingerprint: fingerprint) {
+            images.insert(ReaderInlineImage(originalOffset: 0, url: url), at: 0)
+        }
+        return images
     }
 
     private func displayHighlight(in content: ChapterContent) -> NSRange? {
@@ -985,7 +1224,15 @@ struct ReaderView: View {
         let index: Int
         let text: String
         let textLength: Int
+        let fingerprint: ReaderReadCoverage.Fingerprint
+        let artFingerprint: String
         let transform: ReaderTextTransform
+    }
+
+    private struct RecapAnchor {
+        let chapter: ChapterContent
+        let end: Int
+        let label: String
     }
 
     private struct ChapterRequest: Equatable {
@@ -1011,11 +1258,37 @@ struct ReaderView: View {
         case webSearch
         case askAI
         case generateImage
+        case recap
+        case chapterArtSettings
         case replace
         case download
         case changeSource
 
         var id: Self { self }
+    }
+}
+
+private struct ReaderChapterArtworkSettings: View {
+    @Binding var enabled: Bool
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Toggle("为这本书预生成下一章插画", isOn: $enabled)
+                } footer: {
+                    Text("阅读时会把下一章的正文片段发给已配置的生图供应商，每章生成一张，可能产生费用。插画位于章首，点按后显示。")
+                }
+            }
+            .navigationTitle("章首插画")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } }
+            }
+        }
+        #if os(iOS)
+        .presentationDetents([.medium])
+        #endif
     }
 }
 

@@ -22,12 +22,13 @@ struct ReaderAskAIPanel: View {
 
     init(
         bookID: UUID, bookTitle: String, author: String, sourceName: String?, chapterTitle: String, excerpt: String,
-        selectedSkillIDs: Binding<Set<String>>, selectedMCPIDs: Binding<Set<String>> = .constant([]),
+        readingContext: ReaderAskAIReadingContext? = nil, selectedSkillIDs: Binding<Set<String>>,
+        selectedMCPIDs: Binding<Set<String>> = .constant([]),
         isGeneral: Bool = false
     ) {
         let context = ReaderAskAIContext(
             bookTitle: bookTitle, author: author, sourceName: sourceName,
-            chapterTitle: chapterTitle, excerpt: excerpt
+            chapterTitle: chapterTitle, excerpt: excerpt, bookID: isGeneral ? nil : bookID, readingContext: readingContext
         )
         _windowSkillIDs = selectedSkillIDs
         _windowMCPIDs = selectedMCPIDs
@@ -44,10 +45,15 @@ struct ReaderAskAIPanel: View {
                 VStack(spacing: 0) {
                     if showsHistory {
                         historyList
-                        if session.isRequesting {
+                        if session.isRequesting && !session.isReviewingHistory {
                             Divider()
                             composer
                         }
+                    } else if session.isReviewingHistory {
+                        transcript
+                        Divider()
+                        Button("返回当前问答", systemImage: "arrow.uturn.backward", action: session.closeHistoryPreview)
+                            .padding()
                     } else {
                         contextBar
                         Divider()
@@ -68,7 +74,7 @@ struct ReaderAskAIPanel: View {
                             .background(.regularMaterial)
                     }
                 }
-                .navigationTitle(showsHistory ? historyTitle : (session.isGeneral ? "AI 助手" : "问 AI"))
+                .navigationTitle(showsHistory || session.isReviewingHistory ? historyTitle : (session.isGeneral ? "AI 助手" : "问 AI"))
                 #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
                 #endif
@@ -144,6 +150,10 @@ struct ReaderAskAIPanel: View {
                     composerFocused = false
                     showsHistory.toggle()
                 }
+                if session.usesReadingSnapshot {
+                    Toggle("本窗口允许联网与外部工具", isOn: $session.allowsExternalTools)
+                        .disabled(session.isRequesting)
+                }
                 Button("当前窗口 Skill（\(session.selectedSkillIDs.count)）", systemImage: "list.bullet.rectangle") {
                     composerFocused = false
                     session.reloadSettings()
@@ -202,6 +212,11 @@ struct ReaderAskAIPanel: View {
                     .disabled(session.isRequesting)
                 }
             }
+            if let reading = session.context.readingContext {
+                Text("已读上下文 · \(reading.progressLabel)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             if !session.context.excerpt.isEmpty {
                 Button {
                     showsExcerpt.toggle()
@@ -252,7 +267,7 @@ struct ReaderAskAIPanel: View {
                 .defaultScrollAnchor(.bottom)
                 .scrollDismissesKeyboard(.interactively)
                 .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in followsLatest = false })
-                .onChange(of: session.conversationID) {
+                .onChange(of: session.conversation?.id) {
                     followsLatest = true
                     proxy.scrollTo(ScrollTarget.latest, anchor: .bottom)
                 }
@@ -304,7 +319,7 @@ struct ReaderAskAIPanel: View {
                     }
                     HStack(spacing: 12) {
                         if !answer.isEmpty { copyButton(answer) }
-                        if latest {
+                        if latest && session.hasRetryContext(for: turn) {
                             Button(
                                 turn.status == .answered ? "重新生成" : "重试",
                                 systemImage: "arrow.clockwise"
@@ -370,7 +385,9 @@ struct ReaderAskAIPanel: View {
                             .disabled(!session.hasDraft)
                     }
                 }
-                Text("对话和选文将发送至 \(destination)")
+                Text(session.usesReadingSnapshot
+                     ? "对话、选文和已读上下文将发送至 \(destination)"
+                     : "对话和选文将发送至 \(destination)")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {

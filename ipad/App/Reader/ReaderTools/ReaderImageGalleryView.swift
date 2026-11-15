@@ -227,7 +227,7 @@ struct ReaderGalleryPicture: View {
         }
     }
 
-    private static nonisolated func thumbnail(at url: URL, maxDimension: Int) -> CGImage? {
+    static nonisolated func thumbnail(at url: URL, maxDimension: Int) -> CGImage? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         let options: [String: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways as String: true,

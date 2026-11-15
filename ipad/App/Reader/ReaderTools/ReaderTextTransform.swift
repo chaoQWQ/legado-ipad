@@ -40,6 +40,7 @@ struct ReaderTextTransform {
 
     private let originalLength: Int
     private let steps: [[Edit]]
+    private let scriptStageCount: Int
     private let imageEdits: [Edit]
 
     init(
@@ -52,6 +53,7 @@ struct ReaderTextTransform {
             let scriptEdits = Self.scriptEdits(from: original, to: display)
             if !scriptEdits.isEmpty { stages.append(scriptEdits) }
         }
+        scriptStageCount = stages.count
 
         for rule in rules where rule.isEnabled && !rule.find.isEmpty && rule.find != rule.replacement {
             let source = display as NSString
@@ -198,6 +200,51 @@ struct ReaderTextTransform {
         return steps.reversed().reduce(base) { offset, edits in
             Self.map(offset, through: edits, from: \.destination, to: \.source)
         }
+    }
+
+    func originalReadingRanges(forDisplay range: NSRange) -> [NSRange] {
+        let length = text.utf16.count
+        guard range.location >= 0, range.location <= length, range.length > 0,
+              range.length <= length - range.location else { return [] }
+        var ranges = Self.sourceRanges(visible: range, undoing: imageEdits)
+        for edits in steps.dropFirst(scriptStageCount).reversed() {
+            ranges = ranges.flatMap { Self.sourceRanges(visible: $0, undoing: edits) }
+        }
+        for edits in steps.prefix(scriptStageCount).reversed() {
+            ranges = ranges.flatMap { Self.sourceRanges(visible: $0, undoing: edits, includeConvertedText: true) }
+        }
+        return ranges
+    }
+
+    private static func sourceRanges(
+        visible: NSRange, undoing edits: [Edit], includeConvertedText: Bool = false
+    ) -> [NSRange] {
+        guard !edits.isEmpty else { return [visible] }
+        let visibleEnd = NSMaxRange(visible)
+        var sourceCursor = 0
+        var displayCursor = 0
+        var result: [NSRange] = []
+
+        func appendUnchanged(upTo displayEnd: Int) {
+            let start = max(visible.location, displayCursor)
+            let end = min(visibleEnd, displayEnd)
+            if end > start {
+                result.append(NSRange(location: sourceCursor + start - displayCursor, length: end - start))
+            }
+        }
+
+        for edit in edits {
+            appendUnchanged(upTo: edit.destination.location)
+            if edit.destination.location >= visibleEnd { return result }
+            if includeConvertedText, edit.destination.length > 0,
+               visible.location <= edit.destination.location, NSMaxRange(edit.destination) <= visibleEnd {
+                result.append(edit.source)
+            }
+            sourceCursor = NSMaxRange(edit.source)
+            displayCursor = NSMaxRange(edit.destination)
+        }
+        appendUnchanged(upTo: visibleEnd)
+        return result
     }
 
     private static func map(

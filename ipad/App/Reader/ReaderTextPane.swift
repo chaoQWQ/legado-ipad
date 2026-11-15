@@ -42,6 +42,8 @@ struct ReaderTextPane: UIViewRepresentable {
     var onToggleControls: () -> Void = {}
     var onUserPageTurn: () -> Void = {}
     var onSelectionAction: (ReaderSelectionAction, ReaderTextSelection) -> Void = { _, _ in }
+    var tracksReading = true
+    var onReadVisibleRange: (NSRange) -> Void = { _ in }
 
     func makeUIView(context: Context) -> ReaderPagingViewport {
         let viewport = ReaderPagingViewport()
@@ -52,6 +54,12 @@ struct ReaderTextPane: UIViewRepresentable {
         view.contentInsetAdjustmentBehavior = .never
         view.textContainer.lineFragmentPadding = 0
         view.delegate = context.coordinator
+        context.coordinator.viewport = viewport
+        context.coordinator.onReadVisibleRange = onReadVisibleRange
+        context.coordinator.setReadingObservation(tracksReading)
+        viewport.onReadingViewportChanged = { [weak coordinator = context.coordinator] in
+            coordinator?.readingViewportChanged()
+        }
         view.onReveal = { [weak coordinator = context.coordinator] offset in
             coordinator?.report(offset)
         }
@@ -90,6 +98,8 @@ struct ReaderTextPane: UIViewRepresentable {
         coordinator.onToggleControls = onToggleControls
         coordinator.onUserPageTurn = onUserPageTurn
         coordinator.onSelectionAction = onSelectionAction
+        coordinator.onReadVisibleRange = onReadVisibleRange
+        coordinator.setReadingObservation(tracksReading)
         viewport.configure(
             mode: pageMode, animationDuration: pageAnimationDuration,
             interaction: interaction, columnWidth: columnWidth
@@ -115,6 +125,7 @@ struct ReaderTextPane: UIViewRepresentable {
     }
 
     static func dismantleUIView(_ viewport: ReaderPagingViewport, coordinator: Coordinator) {
+        coordinator.setReadingObservation(false)
         viewport.cancelAnimation()
         viewport.textView.setAutomaticSpeed(nil)
     }
@@ -123,6 +134,7 @@ struct ReaderTextPane: UIViewRepresentable {
         Coordinator(onScroll: onScroll, onAutomaticEnd: onAutomaticEnd)
     }
 
+    @MainActor
     final class Coordinator: NSObject, UITextViewDelegate {
         var text: String?
         var images: [ReaderDisplayImage] = []
@@ -135,10 +147,15 @@ struct ReaderTextPane: UIViewRepresentable {
         var onToggleControls: () -> Void = {}
         var onUserPageTurn: () -> Void = {}
         var onSelectionAction: (ReaderSelectionAction, ReaderTextSelection) -> Void = { _, _ in }
+        var onReadVisibleRange: (NSRange) -> Void = { _ in }
+        weak var viewport: ReaderPagingViewport?
         private var lastOffset: Int?
         private var pendingOffset: Int?
         private var pendingEnd = false
         private var reportScheduled = false
+        private var tracksReading = false
+        private var readingObservation: Task<Void, Never>?
+        private var readingViewportChangedAt = ContinuousClock.now
 
         init(onScroll: @escaping (Int) -> Void, onAutomaticEnd: @escaping () -> Void) {
             self.onScroll = onScroll
@@ -146,9 +163,51 @@ struct ReaderTextPane: UIViewRepresentable {
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
+            if viewport?.mode == .scroll { readingViewportChanged() }
             guard let view = scrollView as? ReadingTextView, let offset = view.readingOffsetAfterScroll else { return }
             view.anchorOffset = offset
             report(offset)
+        }
+
+        func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+            readingViewportChanged()
+        }
+
+        func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+            if !decelerate { readingViewportChanged() }
+        }
+
+        func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+            readingViewportChanged()
+        }
+
+        func setReadingObservation(_ enabled: Bool) {
+            guard tracksReading != enabled else { return }
+            tracksReading = enabled
+            if enabled {
+                readingViewportChanged()
+            } else {
+                readingObservation?.cancel()
+                readingObservation = nil
+            }
+        }
+
+        func readingViewportChanged() {
+            guard tracksReading else { return }
+            readingViewportChangedAt = .now
+            guard readingObservation == nil else { return }
+            // Record a settled viewport, never the positions crossed during a fling or seek.
+            readingObservation = Task { @MainActor [weak self] in
+                while let changedAt = self?.readingViewportChangedAt {
+                    do { try await ContinuousClock().sleep(until: changedAt + .seconds(1)) }
+                    catch { return }
+                    guard !Task.isCancelled, let self else { return }
+                    guard readingViewportChangedAt == changedAt else { continue }
+                    readingObservation = nil
+                    if let range = viewport?.visibleReadingRange { onReadVisibleRange(range) }
+                    return
+                }
+            }
         }
 
         func textView(
@@ -393,6 +452,29 @@ final class ReadingTextView: UITextView {
         return offset
     }
 
+    var visibleReadingRange: NSRange? {
+        guard !showsDiscretePages, pendingTarget == nil, !isTracking, !isDragging, !isDecelerating,
+              textStorage.length > 0, lastLayoutSize == bounds.size else { return nil }
+        let insets = textContainerInset
+        let visible = CGRect(
+            x: 0, y: max(0, contentOffset.y), width: bounds.width - insets.left - insets.right,
+            height: bounds.height - insets.top - insets.bottom
+        )
+        guard visible.width > 0, visible.height > 0 else { return nil }
+        layoutManager.ensureLayout(forBoundingRect: visible, in: textContainer)
+        let glyphs = layoutManager.glyphRange(forBoundingRect: visible, in: textContainer)
+        guard glyphs.length > 0 else { return nil }
+        var first: Int?
+        var end = 0
+        layoutManager.enumerateLineFragments(forGlyphRange: glyphs) { bounds, _, _, range, _ in
+            guard bounds.minY >= visible.minY - 0.5, bounds.maxY <= visible.maxY + 0.5 else { return }
+            if first == nil { first = range.location }
+            end = NSMaxRange(range)
+        }
+        guard let first, end > first else { return nil }
+        return layoutManager.characterRange(forGlyphRange: NSRange(location: first, length: end - first), actualGlyphRange: nil)
+    }
+
     private var firstVisibleOffset: Int? {
         guard pendingTarget == nil, lastLayoutSize == bounds.size, bounds.width > 0, textStorage.length > 0 else {
             return nil
@@ -546,6 +628,8 @@ struct ReaderTextPane: View {
     var onToggleControls: () -> Void = {}
     var onUserPageTurn: () -> Void = {}
     var onSelectionAction: (ReaderSelectionAction, ReaderTextSelection) -> Void = { _, _ in }
+    var tracksReading = true
+    var onReadVisibleRange: (NSRange) -> Void = { _ in }
 
     var body: some View {
         ScrollView {

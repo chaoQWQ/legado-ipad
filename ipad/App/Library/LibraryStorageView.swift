@@ -84,9 +84,9 @@ struct LibraryStorageView: View {
             LabeledContent("总占用", value: storageSize(snapshot.totalBytes))
             LabeledContent("在线章节缓存", value: storageSize(snapshot.onlineBytes))
             LabeledContent("导入的本地书籍", value: storageSize(snapshot.localBytes))
-            if snapshot.galleryBytes > 0 { LabeledContent("AI 图库", value: storageSize(snapshot.galleryBytes)) }
+            if snapshot.galleryBytes > 0 { LabeledContent("AI 图库与章首插画", value: storageSize(snapshot.galleryBytes)) }
             if snapshot.workspaceBytes > 0 { LabeledContent("AI 工作区", value: storageSize(snapshot.workspaceBytes)) }
-            if snapshot.configurationBytes > 0 { LabeledContent("配置与 AI 对话", value: storageSize(snapshot.configurationBytes)) }
+            if snapshot.configurationBytes > 0 { LabeledContent("配置、阅读记录与 AI 对话", value: storageSize(snapshot.configurationBytes)) }
         } header: {
             Text("存储用量")
         } footer: {

@@ -10,12 +10,15 @@ struct LibraryAuxiliaryStorage: Sendable {
         guard try properties(of: appRoot)?.isDirectory == true else { return Self() }
 
         let gallery = appRoot.appending(path: "GeneratedImages", directoryHint: .isDirectory)
+        let chapterIllustrations = appRoot.appending(path: "ChapterIllustrations", directoryHint: .isDirectory)
         let catalog = appRoot.appending(path: "library.json", directoryHint: .notDirectory)
         let readerAI = appRoot.appending(path: "ReaderAI", directoryHint: .isDirectory)
+        let readCoverage = appRoot.appending(path: "ReadCoverage", directoryHint: .isDirectory)
         var storage = Self()
-        storage.galleryBytes = try size(of: children(in: gallery))
+        storage.galleryBytes = try size(of: [gallery, chapterIllustrations])
+        storage.configurationBytes = try size(of: [readCoverage])
         if let properties = try properties(of: catalog), properties.isRegularFile == true {
-            storage.configurationBytes = Int64(properties.fileSize ?? 0)
+            storage.configurationBytes += Int64(properties.fileSize ?? 0)
         }
         for child in try children(in: readerAI) {
             try Task.checkCancellation()
