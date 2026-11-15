@@ -22,6 +22,6 @@ xcodebuild -project LegadoPad.xcodeproj -scheme LegadoPad \
 - 阅读页底部可搜索本地或已缓存的正文、调整章内进度、自动滚动、管理文字替换、切换夜间主题和启动系统朗读。「界面」可调整字体、字号、主题和正文宽度，「设置」可调整行距、段距和首行缩进。书架会记录每本书的阅读位置，也可以添加书签。
 - 在线书籍可刷新当前章、选择章节范围下载，或从其他已启用的书源换源。换源按章名匹配阅读位置，并按书源保留已下载章节和书签。自动滚动和系统朗读在当前章节内运行。
 
-书源使用自身指定的 HTTP 或 HTTPS 地址。兼容范围包括常见 CSS、XPath、基础 JSONPath 和 Legado 选择器，可处理常规 GET／POST 和目录或正文分页。JavaScript、WebView、登录流程和部分复杂规则暂未移植。应用不内置书籍或书源。
+书源使用自身指定的 HTTP 或 HTTPS 地址。兼容范围包括常见 CSS、XPath、基础 JSONPath 和 Legado 选择器，可处理常规 GET／POST 和目录或正文分页。正文替换规则 `@js:java.t2s(result)` 由系统执行繁体转简体，也适用于已缓存的正文。通用 JavaScript、WebView、登录流程和部分复杂规则暂未移植。应用不内置书籍或书源。
 
 本分支使用仓库的 [GPL-3.0 许可](../LICENSE)。iPad 应用使用仓库的 [阅读 Archive 图标](../docs/archive_icon.svg)。

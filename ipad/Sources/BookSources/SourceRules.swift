@@ -253,11 +253,36 @@ private struct RuleReplacement {
     }
 }
 
-func applyReplacement(_ rule: String?, to text: String) throws -> String {
+func applyReplacement(_ rule: String?, to text: String, applyingTextConversion: Bool = true) throws -> String {
     guard let rule = rule?.nilIfBlank else { return text }
+    if usesSimplifiedChineseConversion(rule) { return applyingTextConversion ? simplifiedChinese(text) : text }
     try rejectDynamicRule(rule)
     guard rule.hasPrefix("##") else { throw BookSourceError.unsupported("非正则正文替换") }
     return try RuleReplacement(rule.components(separatedBy: "##"), field: "正文替换").apply(text)
+}
+
+extension BookSource {
+    /// Applies the recognized native Chinese conversion to previously cached chapter text.
+    public func convertCachedContent(_ text: String) -> String {
+        guard let rule = contentRule?.replaceRegex?.nilIfBlank, usesSimplifiedChineseConversion(rule) else { return text }
+        return simplifiedChinese(text)
+    }
+}
+
+private func usesSimplifiedChineseConversion(_ rule: String) -> Bool {
+    let expression: Substring
+    if rule.prefix(4).lowercased() == "@js:" {
+        expression = rule.dropFirst(4)
+    } else if rule.prefix(4).lowercased() == "<js>", rule.suffix(5).lowercased() == "</js>" {
+        expression = rule.dropFirst(4).dropLast(5)
+    } else {
+        return false
+    }
+    return expression.range(of: #"\A\s*java\s*\.\s*t2s\s*\(\s*result\s*\)\s*;?\s*\z"#, options: .regularExpression) != nil
+}
+
+private func simplifiedChinese(_ text: String) -> String {
+    text.applyingTransform(StringTransform("Traditional-Simplified"), reverse: false) ?? text
 }
 
 func splitRule(_ value: String, separators: [String]) -> (parts: [String], separator: String?) {

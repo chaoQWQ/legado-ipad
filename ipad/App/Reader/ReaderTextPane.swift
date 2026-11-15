@@ -3,17 +3,11 @@ import SwiftUI
 struct ReaderScrollRequest: Equatable {
     enum Target: Equatable {
         case offset(Int)
-        case fraction(Double)
         case reveal(Int)
     }
 
     let id = UUID()
     let target: Target
-}
-
-struct ReaderScrollReport: Equatable {
-    let offset: Int?
-    let fraction: Double
 }
 
 #if os(iOS)
@@ -26,7 +20,7 @@ struct ReaderTextPane: UIViewRepresentable {
     let request: ReaderScrollRequest?
     let highlight: NSRange?
     let automaticSpeed: Double?
-    let onScroll: (ReaderScrollReport) -> Void
+    let onScroll: (Int) -> Void
     let onAutomaticEnd: () -> Void
 
     func makeUIView(context: Context) -> ReadingTextView {
@@ -39,11 +33,11 @@ struct ReaderTextPane: UIViewRepresentable {
         view.textContainerInset = UIEdgeInsets(top: 14, left: 24, bottom: 28, right: 24)
         view.textContainer.lineFragmentPadding = 0
         view.delegate = context.coordinator
-        view.onLayout = { [weak view, weak coordinator = context.coordinator] moved in
-            if let view { coordinator?.report(view, moved: moved) }
+        view.onReveal = { [weak coordinator = context.coordinator] offset in
+            coordinator?.report(offset)
         }
         view.onAutomaticEnd = { [weak view, weak coordinator = context.coordinator] in
-            if let view { coordinator?.report(view, moved: true, automaticEnd: true) }
+            if let view { coordinator?.report(view.anchorOffset, automaticEnd: true) }
         }
         view.replace(text, typography: typography, at: initialOffset)
         context.coordinator.text = text
@@ -68,6 +62,7 @@ struct ReaderTextPane: UIViewRepresentable {
         }
         if let request, coordinator.request != request {
             coordinator.request = request
+            if case .offset = request.target { coordinator.discardPendingScroll() }
             view.seek(to: request.target)
         }
         view.setAutomaticSpeed(automaticSpeed)
@@ -86,29 +81,26 @@ struct ReaderTextPane: UIViewRepresentable {
         var typography: ReaderTypography?
         var request: ReaderScrollRequest?
         var highlight: NSRange?
-        var onScroll: (ReaderScrollReport) -> Void
+        var onScroll: (Int) -> Void
         var onAutomaticEnd: () -> Void
         private var lastOffset: Int?
-        private var lastFraction = -1.0
         private var pendingOffset: Int?
-        private var pendingFraction = 0.0
         private var pendingEnd = false
         private var reportScheduled = false
 
-        init(onScroll: @escaping (ReaderScrollReport) -> Void, onAutomaticEnd: @escaping () -> Void) {
+        init(onScroll: @escaping (Int) -> Void, onAutomaticEnd: @escaping () -> Void) {
             self.onScroll = onScroll
             self.onAutomaticEnd = onAutomaticEnd
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
-            guard let view = scrollView as? ReadingTextView, let offset = view.firstVisibleOffset else { return }
+            guard let view = scrollView as? ReadingTextView, let offset = view.readingOffsetAfterScroll else { return }
             view.anchorOffset = offset
-            report(view, moved: true)
+            report(offset)
         }
 
-        func report(_ view: ReadingTextView, moved: Bool, automaticEnd: Bool = false) {
-            pendingOffset = moved ? view.anchorOffset : nil
-            pendingFraction = view.scrollFraction
+        func report(_ offset: Int, automaticEnd: Bool = false) {
+            pendingOffset = offset
             pendingEnd = pendingEnd || automaticEnd
             guard !reportScheduled else { return }
             reportScheduled = true
@@ -117,15 +109,17 @@ struct ReaderTextPane: UIViewRepresentable {
             }
         }
 
+        func discardPendingScroll() {
+            lastOffset = nil
+            pendingOffset = nil
+            pendingEnd = false
+        }
+
         private func publishReport() {
             reportScheduled = false
-            let changedOffset = pendingOffset != nil && pendingOffset != lastOffset
-            let changedFraction = abs(lastFraction - pendingFraction) >= 0.003
-                || (lastFraction != pendingFraction && (pendingFraction == 0 || pendingFraction == 1))
-            if changedOffset || changedFraction {
+            if let pendingOffset, pendingOffset != lastOffset {
                 lastOffset = pendingOffset
-                lastFraction = pendingFraction
-                onScroll(ReaderScrollReport(offset: pendingOffset, fraction: pendingFraction))
+                onScroll(pendingOffset)
             }
             if pendingEnd {
                 pendingEnd = false
@@ -137,7 +131,7 @@ struct ReaderTextPane: UIViewRepresentable {
 
 final class ReadingTextView: UITextView {
     var anchorOffset = 0
-    var onLayout: ((Bool) -> Void)?
+    var onReveal: ((Int) -> Void)?
     var onAutomaticEnd: (() -> Void)?
     private var pendingTarget: ReaderScrollRequest.Target?
     private var lastLayoutSize: CGSize = .zero
@@ -213,12 +207,18 @@ final class ReadingTextView: UITextView {
         setNeedsLayout()
     }
 
-    var scrollFraction: Double {
-        guard maximumScroll > 0 else { return 0 }
-        return min(1, max(0, contentOffset.y / maximumScroll))
+    var readingOffsetAfterScroll: Int? {
+        guard let offset = firstVisibleOffset else { return nil }
+        // UITextView can report a partial contentSize while TextKit lays out
+        // the chapter. Verify the real end before saving the 100% position.
+        if contentOffset.y > 0, contentOffset.y >= maximumScroll - 1,
+           contentOffset.y >= laidOutMaximumScroll() - 1 {
+            return textStorage.length
+        }
+        return offset
     }
 
-    var firstVisibleOffset: Int? {
+    private var firstVisibleOffset: Int? {
         guard pendingTarget == nil, lastLayoutSize == bounds.size, bounds.width > 0, textStorage.length > 0 else {
             return nil
         }
@@ -244,15 +244,14 @@ final class ReadingTextView: UITextView {
         switch target {
         case .offset(0):
             y = 0
+        case .offset(let offset) where offset >= textStorage.length:
+            y = laidOutMaximumScroll()
         case .offset(let offset):
             let location = min(max(0, offset), textStorage.length - 1)
             layoutManager.ensureLayout(forCharacterRange: NSRange(location: location, length: 1))
             let glyph = layoutManager.glyphIndexForCharacter(at: location)
             let line = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
             y = min(line.minY, maximumScroll)
-        case .fraction(let fraction):
-            layoutManager.ensureLayout(for: textContainer)
-            y = maximumScroll * min(1, max(0, fraction))
         case .reveal(let offset):
             let location = min(max(0, offset), textStorage.length - 1)
             layoutManager.ensureLayout(forCharacterRange: NSRange(location: location, length: 1))
@@ -268,13 +267,19 @@ final class ReadingTextView: UITextView {
         }
         setContentOffset(CGPoint(x: 0, y: y), animated: false)
         pendingTarget = nil
-        switch target {
-        case .offset:
-            onLayout?(false)
-        case .fraction, .reveal:
-            if let offset = firstVisibleOffset { anchorOffset = offset }
-            onLayout?(true)
+        if case .reveal = target, let offset = firstVisibleOffset {
+            anchorOffset = offset
+            onReveal?(offset)
         }
+    }
+
+    private func laidOutMaximumScroll() -> CGFloat {
+        layoutManager.ensureLayout(for: textContainer)
+        let textBottom = max(
+            layoutManager.usedRect(for: textContainer).maxY,
+            layoutManager.extraLineFragmentRect.maxY
+        )
+        return max(0, ceil(textBottom + textContainerInset.top + textContainerInset.bottom) - bounds.height)
     }
 
     func setAutomaticSpeed(_ speed: Double?) {
@@ -293,13 +298,15 @@ final class ReadingTextView: UITextView {
     fileprivate func advanceAutomaticScroll(by elapsed: TimeInterval) {
         guard let automaticSpeed, pendingTarget == nil, !isTracking, !isDragging, !isDecelerating else { return }
         let delta = min(max(elapsed, 0), 0.05)
-        let end = maximumScroll
         let next = max(0, contentOffset.y) + automaticSpeed * delta
+        let estimatedEnd = maximumScroll
+        let end = next >= estimatedEnd - 0.5 ? laidOutMaximumScroll() : estimatedEnd
         let y = next >= end - 0.5 ? end : next
         if y != contentOffset.y {
             setContentOffset(CGPoint(x: 0, y: y), animated: false)
         }
         if y >= end {
+            if end > 0 { anchorOffset = textStorage.length }
             setAutomaticSpeed(nil)
             onAutomaticEnd?()
         }
@@ -327,7 +334,7 @@ struct ReaderTextPane: View {
     let request: ReaderScrollRequest?
     let highlight: NSRange?
     let automaticSpeed: Double?
-    let onScroll: (ReaderScrollReport) -> Void
+    let onScroll: (Int) -> Void
     let onAutomaticEnd: () -> Void
 
     var body: some View {

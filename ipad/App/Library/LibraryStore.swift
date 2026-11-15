@@ -191,11 +191,8 @@ final class LibraryStore: ObservableObject {
     }
 
     func cachedChapter(in book: LibraryBook, at index: Int) async throws -> String? {
-        guard book.chapters.indices.contains(index) else { throw LibraryError.noChapters }
-        try verifyCurrent(book)
-        let cached = try await files.readChapter(in: book, at: index)
-        try verifyCurrent(book)
-        return cached
+        let cached = try await readCachedChapter(in: book, at: index)
+        return cached.map { chapterTextForReading($0, in: book) }
     }
 
     func chapter(in book: LibraryBook, at index: Int) async throws -> String {
@@ -204,7 +201,7 @@ final class LibraryStore: ObservableObject {
         try Task.checkCancellation()
         try verifyCurrent(book)
         try? await files.writeChapter(text, in: book, at: index, replaces: false)
-        return text
+        return chapterTextForReading(text, in: book)
     }
 
     func refreshChapter(in book: LibraryBook, at index: Int) async throws -> String {
@@ -212,11 +209,11 @@ final class LibraryStore: ObservableObject {
         try Task.checkCancellation()
         try verifyCurrent(book)
         try await files.writeChapter(text, in: book, at: index, replaces: true)
-        return text
+        return chapterTextForReading(text, in: book)
     }
 
     func downloadChapter(in book: LibraryBook, at index: Int) async throws {
-        if try await cachedChapter(in: book, at: index) != nil { return }
+        if try await readCachedChapter(in: book, at: index) != nil { return }
         let text = try await fetchChapter(in: book, at: index, bypassCache: false)
         try Task.checkCancellation()
         try verifyCurrent(book)
@@ -252,7 +249,7 @@ final class LibraryStore: ObservableObject {
 
         try verifyCurrent(book)
         if try await files.readChapter(in: replacement, at: target) == nil {
-            let text = try await client.content(of: chapters[target], in: source)
+            let text = try await client.content(of: chapters[target], in: source, applyingTextConversion: false)
             try Task.checkCancellation()
             try verifyCurrent(book)
             try await files.writeChapter(text, in: replacement, at: target, replaces: false)
@@ -274,12 +271,25 @@ final class LibraryStore: ObservableObject {
         guard currentBook(book.id)?.readerIdentity == book.readerIdentity else { throw LibraryError.bookUnavailable }
     }
 
+    private func readCachedChapter(in book: LibraryBook, at index: Int) async throws -> String? {
+        guard book.chapters.indices.contains(index) else { throw LibraryError.noChapters }
+        try verifyCurrent(book)
+        let cached = try await files.readChapter(in: book, at: index)
+        try verifyCurrent(book)
+        return cached
+    }
+
+    private func chapterTextForReading(_ text: String, in book: LibraryBook) -> String {
+        guard let sourceID = book.sourceID, let source = sources.first(where: { $0.id == sourceID }) else { return text }
+        return source.convertCachedContent(text)
+    }
+
     private func fetchChapter(in book: LibraryBook, at index: Int, bypassCache: Bool) async throws -> String {
         try verifyCurrent(book)
         guard book.chapters.indices.contains(index) else { throw LibraryError.noChapters }
         guard let chapter = book.chapters[index].online else { throw LibraryError.missingChapter }
         guard let source = sources.first(where: { $0.id == book.sourceID }) else { throw LibraryError.missingSource }
-        return try await client.content(of: chapter, in: source, bypassCache: bypassCache)
+        return try await client.content(of: chapter, in: source, bypassCache: bypassCache, applyingTextConversion: false)
     }
 
     func importSources(from url: URL) async throws -> Int {

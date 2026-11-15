@@ -161,7 +161,9 @@ public struct BookSourceClient: Sendable {
         return chapters
     }
 
-    public func content(of chapter: SourceChapter, in source: BookSource, bypassCache: Bool = false) async throws -> String {
+    public func content(
+        of chapter: SourceChapter, in source: BookSource, bypassCache: Bool = false, applyingTextConversion: Bool = true
+    ) async throws -> String {
         try check(source)
         guard let rule = source.contentRule, let content = rule.content?.nilIfBlank else {
             throw BookSourceError.missingRule("正文")
@@ -183,7 +185,8 @@ public struct BookSourceClient: Sendable {
             let links = try page.root.strings(rule.nextContentUrl, field: "正文下一页")
             try traversal.append(links, relativeTo: page.url, field: "正文下一页", stoppingAt: chapter.nextChapterURL)
         }
-        let formatted = try applyReplacement(rule.replaceRegex, to: pages.joined(separator: "\n\n")).trimmed
+        let formatted = try applyReplacement(rule.replaceRegex, to: pages.joined(separator: "\n\n"),
+                                             applyingTextConversion: applyingTextConversion).trimmed
         guard !formatted.isEmpty else { throw BookSourceError.emptyContent }
         return formatted
     }

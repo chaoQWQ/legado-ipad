@@ -170,6 +170,56 @@ struct BookSourceTests {
         #expect(text == "前半章\n\n后半章")
     }
 
+    @Test func builtInSimplificationConvertsAllPagesAndExistingCache() async throws {
+        let source = try importSource(#"""
+        {
+          "bookSourceUrl":"https://fiction.example", "bookSourceName":"中文正文",
+          "ruleContent":{"content":"@css:p@text", "nextContentUrl":"@css:a@href", "replaceRegex":"@js:java.t2s(result)"}
+        }
+        """#)
+        let url = try #require(URL(string: "https://fiction.example/chapter"))
+        let client = BookSourceClient { request, _ in
+            let page = try #require(request.url)
+            switch page.path {
+            case "/chapter": return self.response(page, #"<p>風起後，國門開了。 📚</p><a href="/second">下一頁</a>"#)
+            case "/second": return self.response(page, "<p>長廊裡亮了燈。</p>")
+            default: throw URLError(.unsupportedURL)
+            }
+        }
+        let original = "風起後，國門開了。 📚\n\n長廊裡亮了燈。"
+        let expected = "风起后，国门开了。 📚\n\n长廊里亮了灯。"
+        let chapter = SourceChapter(title: "第一章", url: url)
+        let converted = try await client.content(of: chapter, in: source)
+        let raw = try await client.content(of: chapter, in: source, applyingTextConversion: false)
+        #expect(converted == expected)
+        #expect(raw == original)
+        #expect(source.convertCachedContent(raw) == expected)
+        #expect(source.convertCachedContent(expected) == expected)
+        #expect(converted.utf16.count == original.utf16.count)
+    }
+
+    @Test func simplificationRecognizesOnlyTheBuiltInExpression() throws {
+        let traditional = "歡迎閱讀。"
+        let simplified = "欢迎阅读。"
+        #expect(try applyReplacement(" @JS:\njava . t2s ( result ); ", to: traditional) == simplified)
+        #expect(try applyReplacement("<js>\njava.t2s(result);\n</js>", to: traditional) == simplified)
+        #expect(try applyReplacement(nil, to: traditional) == traditional)
+        #expect(try applyReplacement("##。", to: traditional, applyingTextConversion: false) == "歡迎閱讀")
+        let source = try importSource(#"""
+        {
+          "bookSourceUrl":"https://fiction.example", "bookSourceName":"普通替换",
+          "ruleContent":{"replaceRegex":"##。"}
+        }
+        """#)
+        #expect(source.convertCachedContent(traditional) == traditional)
+        #expect(throws: BookSourceError.unsupported("JavaScript 或规则变量")) {
+            try applyReplacement("@js:java.t2s(result); otherFunction(result)", to: traditional, applyingTextConversion: false)
+        }
+        #expect(throws: BookSourceError.unsupported("JavaScript 或规则变量")) {
+            try applyReplacement("@js:java.t2s(result + 'extra')", to: traditional)
+        }
+    }
+
     private func importSource(_ json: String) throws -> BookSource {
         try #require(BookSourceImport.decode(Data(json.utf8)).first)
     }

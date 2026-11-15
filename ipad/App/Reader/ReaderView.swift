@@ -37,7 +37,6 @@ struct ReaderView: View {
     @State private var chapterIndex: Int
     @State private var offset: Int
     @State private var content: ChapterContent?
-    @State private var scrollFraction = 0.0
     @State private var scrollRequest: ReaderScrollRequest?
     @State private var highlight: SearchHighlight?
     @State private var automaticScroll = false
@@ -81,6 +80,11 @@ struct ReaderView: View {
     private var position: ReaderPosition { ReaderPosition(chapterIndex: chapterIndex, offset: offset) }
     private var hasBookmark: Bool { bookmarks.contains { $0.position == position } }
     private var hasBody: Bool { content?.transform.text.isEmpty == false }
+    private var scrollFraction: Double {
+        guard let content, content.index == chapterIndex, content.textLength > 0 else { return 0 }
+        // Progress and resume use the same UTF-16 offset in the original chapter.
+        return Double(offset) / Double(content.textLength)
+    }
     private var isNight: Bool { palette == .night }
     private var chapterTitle: String {
         chapters.indices.contains(chapterIndex) ? chapters[chapterIndex].title : ""
@@ -243,6 +247,7 @@ struct ReaderView: View {
                 if content.transform.text.isEmpty {
                     ContentUnavailableView("本章暂无正文", systemImage: "doc.text")
                 } else {
+                    let request = scrollRequest
                     ReaderTextPane(
                         text: content.transform.text,
                         typography: ReaderTypography(
@@ -254,10 +259,12 @@ struct ReaderView: View {
                             indentParagraphs: indentParagraphs
                         ),
                         initialOffset: content.transform.displayOffset(forOriginal: offset),
-                        request: scrollRequest,
+                        request: request,
                         highlight: displayHighlight(in: content),
                         automaticSpeed: automaticScroll ? automaticSpeed : nil,
-                        onScroll: { updateScroll($0, in: content) },
+                        onScroll: { displayOffset in
+                            if scrollRequest == request { updateScroll(displayOffset, in: content) }
+                        },
                         onAutomaticEnd: {
                             if self.content?.id == content.id { finishAutomaticScroll() }
                         }
@@ -413,7 +420,8 @@ struct ReaderView: View {
 
     private func chapterStepButton(_ step: Double, title: String, icon: String) -> some View {
         Button {
-            seek(to: min(1, max(0, scrollFraction + step)))
+            let displayedFraction = (scrollFraction * 100).rounded() / 100
+            seek(to: displayedFraction + step)
         } label: {
             Label(title, systemImage: icon)
                 .labelStyle(.iconOnly)
@@ -502,7 +510,7 @@ struct ReaderView: View {
         case .idle:
             guard let content else { return }
             finishAutomaticScroll()
-            let current = content.transform.displayOffset(forOriginal: offset)
+            let current = offset == content.textLength ? 0 : content.transform.displayOffset(forOriginal: offset)
             speech.start(text: content.transform.text, utf16Offset: current) { spokenOffset in
                 guard self.content?.id == content.id else { return }
                 scrollRequest = ReaderScrollRequest(target: .reveal(spokenOffset))
@@ -516,11 +524,13 @@ struct ReaderView: View {
     }
 
     private func seek(to fraction: Double) {
-        guard hasBody else { return }
+        guard let content, hasBody else { return }
         speech.stop()
         if automaticScroll { finishAutomaticScroll() }
         highlight = nil
-        scrollRequest = ReaderScrollRequest(target: .fraction(fraction))
+        let targetOffset = Int((min(1, max(0, fraction)) * Double(content.textLength)).rounded())
+        scrollRequest = ReaderScrollRequest(target: .offset(content.transform.displayOffset(forOriginal: targetOffset)))
+        updateReadingOffset(targetOffset)
     }
 
     private func selectChapter(_ index: Int) {
@@ -536,7 +546,7 @@ struct ReaderView: View {
         self.highlight = highlight
         errorMessage = nil
         if let content, content.index == index {
-            offset = clampedOffset(position.offset, in: content.text)
+            offset = min(max(0, position.offset), content.textLength)
             scrollRequest = ReaderScrollRequest(target: .offset(content.transform.displayOffset(forOriginal: offset)))
             saveProgress()
             return
@@ -546,7 +556,6 @@ struct ReaderView: View {
         content = nil
         refreshRequest = nil
         scrollRequest = nil
-        scrollFraction = 0
         if index == chapterIndex { attempt += 1 }
         chapterIndex = index
     }
@@ -593,11 +602,13 @@ struct ReaderView: View {
     }
 
     private func setContent(_ text: String, at index: Int, offset requestedOffset: Int) {
-        offset = clampedOffset(requestedOffset, in: text)
+        let textLength = text.utf16.count
+        offset = min(max(0, requestedOffset), textLength)
         scrollRequest = nil
         content = ChapterContent(
             index: index,
             text: text,
+            textLength: textLength,
             transform: ReaderTextTransform(original: text, rules: ReaderReplacementRule.decode(replacementData))
         )
         saveProgress()
@@ -612,7 +623,7 @@ struct ReaderView: View {
 
     private func displayHighlight(in content: ChapterContent) -> NSRange? {
         guard let highlight, highlight.chapterIndex == content.index,
-              highlight.range.location >= 0, NSMaxRange(highlight.range) <= content.text.utf16.count else {
+              highlight.range.location >= 0, NSMaxRange(highlight.range) <= content.textLength else {
             return nil
         }
         let start = content.transform.displayOffset(forOriginal: highlight.range.location)
@@ -620,18 +631,15 @@ struct ReaderView: View {
         return end > start ? NSRange(location: start, length: end - start) : nil
     }
 
-    private func clampedOffset(_ offset: Int, in text: String) -> Int {
-        min(max(0, offset), max(0, text.utf16.count - 1))
+    private func updateScroll(_ displayOffset: Int, in content: ChapterContent) {
+        guard self.content?.id == content.id else { return }
+        let originalOffset = content.transform.originalOffset(forDisplay: displayOffset)
+        updateReadingOffset(originalOffset)
     }
 
-    private func updateScroll(_ report: ReaderScrollReport, in content: ChapterContent) {
-        guard self.content?.id == content.id else { return }
-        scrollFraction = report.fraction
-        guard let displayOffset = report.offset else { return }
-
-        let visibleOffset = content.transform.originalOffset(forDisplay: displayOffset)
-        guard visibleOffset != offset else { return }
-        offset = visibleOffset
+    private func updateReadingOffset(_ newOffset: Int) {
+        guard newOffset != offset else { return }
+        offset = newOffset
         guard saveTask == nil else { return }
         saveTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(350))
@@ -668,6 +676,7 @@ struct ReaderView: View {
         let id = UUID()
         let index: Int
         let text: String
+        let textLength: Int
         let transform: ReaderTextTransform
     }
 
