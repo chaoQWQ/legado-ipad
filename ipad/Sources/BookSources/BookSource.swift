@@ -4,8 +4,13 @@ public struct BookSource: Codable, Identifiable, Equatable, Sendable {
     public let id: String
     public let name: String
     public let group: String?
-    public var isEnabled: Bool
+    public var isEnabled: Bool {
+        get { document["enabled"]?.bool ?? true }
+        set { document["enabled"] = .bool(newValue) }
+    }
+    public var lastUpdateTimestamp: Int? { document["lastUpdateTime"]?.integer.flatMap { $0 > 0 ? $0 : nil } }
     public let baseURL: URL
+    private(set) var document: [String: BookSourceJSONValue]
 
     let type: Int
     let searchURL: String?
@@ -44,12 +49,14 @@ public struct BookSource: Codable, Identifiable, Equatable, Sendable {
         id = try values.decode(String.self, forKey: .id).trimmed
         name = try values.decode(String.self, forKey: .name).trimmed
         group = try values.decodeIfPresent(String.self, forKey: .group)?.nilIfBlank
-        isEnabled = try values.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
+        _ = try values.decodeIfPresent(Bool.self, forKey: .isEnabled)
         type = try values.decodeIfPresent(Int.self, forKey: .type) ?? 0
         searchURL = try values.decodeIfPresent(String.self, forKey: .searchURL)
         bookURLPattern = try values.decodeIfPresent(String.self, forKey: .bookURLPattern)
         if let map = try? values.decode([String: String].self, forKey: .headers) {
-            headers = String(data: try JSONEncoder().encode(map), encoding: .utf8)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .sortedKeys
+            headers = String(decoding: try encoder.encode(map), as: UTF8.self)
         } else {
             headers = try values.decodeIfPresent(String.self, forKey: .headers)
         }
@@ -59,6 +66,7 @@ public struct BookSource: Codable, Identifiable, Equatable, Sendable {
         infoRule = try Self.decodeRule(InfoRule.self, from: values, key: .infoRule)
         tocRule = try Self.decodeRule(TocRule.self, from: values, key: .tocRule)
         contentRule = try Self.decodeRule(ContentRule.self, from: values, key: .contentRule)
+        document = try [String: BookSourceJSONValue](from: decoder)
 
         guard !name.isEmpty, let baseURL = URL(string: id), baseURL.isWebURL else {
             throw BookSourceError.invalidSource
@@ -66,12 +74,20 @@ public struct BookSource: Codable, Identifiable, Equatable, Sendable {
         self.baseURL = baseURL
     }
 
+    public func encode(to encoder: Encoder) throws {
+        try document.encode(to: encoder)
+    }
+
     private static func decodeRule<T: Decodable>(
         _ type: T.Type, from values: KeyedDecodingContainer<CodingKeys>, key: CodingKeys
     ) throws -> T? {
         if let serialized = try? values.decode(String.self, forKey: key) {
             guard let serialized = serialized.nilIfBlank else { return nil }
-            return try JSONDecoder().decode(T?.self, from: Data(serialized.utf8))
+            do {
+                return try JSONDecoder().decode(T?.self, from: Data(serialized.utf8))
+            } catch {
+                throw DecodingError.dataCorruptedError(forKey: key, in: values, debugDescription: "Invalid serialized rule object.")
+            }
         }
         return try values.decodeIfPresent(type, forKey: key)
     }

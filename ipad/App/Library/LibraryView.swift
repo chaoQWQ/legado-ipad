@@ -6,6 +6,7 @@ private enum LibraryDestination: String, CaseIterable, Identifiable {
     case shelf
     case search
     case sources
+    case subscriptions
 
     var id: Self { self }
     var title: String {
@@ -13,6 +14,7 @@ private enum LibraryDestination: String, CaseIterable, Identifiable {
         case .shelf: "书架"
         case .search: "搜书"
         case .sources: "书源"
+        case .subscriptions: "订阅"
         }
     }
     var icon: String {
@@ -20,6 +22,7 @@ private enum LibraryDestination: String, CaseIterable, Identifiable {
         case .shelf: "books.vertical"
         case .search: "magnifyingglass"
         case .sources: "text.badge.checkmark"
+        case .subscriptions: "dot.radiowaves.left.and.right"
         }
     }
 }
@@ -27,6 +30,7 @@ private enum LibraryDestination: String, CaseIterable, Identifiable {
 struct LibraryView: View {
     @EnvironmentObject private var library: LibraryStore
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.scenePhase) private var scenePhase
     @State private var destination: LibraryDestination? = .shelf
     @State private var column: NavigationSplitViewColumn = .detail
     @State private var reader: LibraryBook?
@@ -35,6 +39,8 @@ struct LibraryView: View {
     @State private var isImporterPresented = false
     @State private var notice: Notice?
     @State private var isImporting = false
+    @State private var sourceToEdit: SourceEditorTarget?
+    @State private var showsAddressImport = false
 
     var body: some View {
         NavigationSplitView(preferredCompactColumn: $column) {
@@ -51,26 +57,38 @@ struct LibraryView: View {
             .scrollContentBackground(.hidden)
             .background(ReaderPalette.canvas(scheme))
         } detail: {
-            selectedContent
-                .background(ReaderPalette.canvas(scheme).ignoresSafeArea())
-                .navigationTitle((destination ?? .shelf).title)
-                #if os(iOS)
-                .navigationBarTitleDisplayMode(.inline)
-                #endif
-                .toolbar {
-                    if destination != .search {
-                        ToolbarItem(placement: .primaryAction) {
-                            Button {
-                                presentImporter(destination == .sources ? .sources : .books)
-                            } label: {
-                                Label("导入", systemImage: "plus")
-                            }
-                            .disabled(isImporting)
-                        }
-                    }
-                }
+            NavigationStack {
+                selectedContent
+                    .background(ReaderPalette.canvas(scheme).ignoresSafeArea())
+                    .navigationTitle((destination ?? .shelf).title)
+                    #if os(iOS)
+                    .navigationBarTitleDisplayMode(.inline)
+                    #endif
+                    .toolbar { detailActions }
+            }
+            .id(destination ?? .shelf)
         }
         .navigationSplitViewStyle(.balanced)
+        .task(id: scenePhase) {
+            if scenePhase == .active { await library.refreshDueSourceSubscriptions() }
+        }
+        .sheet(item: $sourceToEdit) { target in
+            NavigationStack {
+                BookSourceEditorView(source: target.source) { source in
+                    try library.saveSource(source, replacing: target.source?.id)
+                }
+            }
+        }
+        .sheet(isPresented: $showsAddressImport) {
+            NavigationStack {
+                SourceAddressImportView(onComplete: { showsAddressImport = false })
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("关闭") { showsAddressImport = false }
+                        }
+                    }
+            }
+        }
         #if os(iOS)
         .fullScreenCover(item: $reader) { book in
             LibraryReadingSession(bookID: book.id) { reader = nil }
@@ -121,7 +139,39 @@ struct LibraryView: View {
                 openBook: { reader = $0 }
             )
         case .sources:
-            SourcesView(importSources: { presentImporter(.sources) }, showError: showError)
+            SourcesView(
+                importSources: { presentImporter(.sources) },
+                importFromAddress: { showsAddressImport = true },
+                createSource: { sourceToEdit = SourceEditorTarget(source: nil) },
+                editSource: { sourceToEdit = SourceEditorTarget(source: $0) },
+                showError: showError
+            )
+        case .subscriptions:
+            SubscriptionsHomeView()
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var detailActions: some ToolbarContent {
+        switch destination ?? .shelf {
+        case .shelf:
+            ToolbarItem(placement: .primaryAction) {
+                Button("导入书籍", systemImage: "plus") { presentImporter(.books) }
+                    .disabled(isImporting)
+            }
+        case .sources:
+            ToolbarItem(placement: .primaryAction) {
+                Menu("添加书源", systemImage: "plus") {
+                    Button("新建书源", systemImage: "square.and.pencil") {
+                        sourceToEdit = SourceEditorTarget(source: nil)
+                    }
+                    Button("从文件导入", systemImage: "doc") { presentImporter(.sources) }
+                        .disabled(isImporting)
+                    Button("从网址导入", systemImage: "link") { showsAddressImport = true }
+                }
+            }
+        case .search, .subscriptions:
+            ToolbarItem(placement: .primaryAction) { EmptyView() }
         }
     }
 
@@ -179,6 +229,11 @@ struct LibraryView: View {
         let id = UUID()
         let title: String
         let message: String
+    }
+
+    private struct SourceEditorTarget: Identifiable {
+        let id = UUID()
+        let source: BookSource?
     }
 
     private enum ImportFormat {

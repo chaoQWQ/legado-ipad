@@ -36,6 +36,10 @@ final class LibraryStore: ObservableObject {
     private struct Catalog: Codable {
         var books: [LibraryBook] = []
         var sources: [BookSource] = []
+        var sourceSubscriptions: [BookSourceSubscription]?
+        var subscriptionSignatures: [UUID: [String: String]]?
+        var pendingSubscriptionUpdates: Set<UUID>?
+        var feeds: [FeedSubscription]?
     }
 
     private struct SavedPosition: Codable, Equatable {
@@ -50,19 +54,26 @@ final class LibraryStore: ObservableObject {
     let client: BookSourceClient
     var books: [LibraryBook] { catalog.books }
     var sources: [BookSource] { catalog.sources }
+    var sourceSubscriptions: [BookSourceSubscription] { catalog.sourceSubscriptions ?? [] }
+    var subscriptionsWithUpdates: Set<UUID> { catalog.pendingSubscriptionUpdates ?? [] }
+    var feeds: [FeedSubscription] { catalog.feeds ?? [] }
 
     private let defaults: UserDefaults
     private let files: LibraryFiles
+    private let subscriptionClient: BookSourceSubscriptionClient
     private let catalogURL: URL
     private let positionKey = "library.readingPositions"
+    private var isCheckingSubscriptions = false
 
     init(
         defaults: UserDefaults = .standard,
         root: URL = URL.applicationSupportDirectory.appending(path: "LegadoPad", directoryHint: .isDirectory),
-        client: BookSourceClient = BookSourceClient()
+        client: BookSourceClient = BookSourceClient(),
+        subscriptionClient: BookSourceSubscriptionClient = BookSourceSubscriptionClient()
     ) {
         self.defaults = defaults
         self.client = client
+        self.subscriptionClient = subscriptionClient
         files = LibraryFiles(root: root)
         catalogURL = root.appending(path: "library.json")
 
@@ -295,15 +306,179 @@ final class LibraryStore: ObservableObject {
     func importSources(from url: URL) async throws -> Int {
         let additions = try await files.readSources(from: url)
         var next = catalog
-        for source in additions {
-            if let index = next.sources.firstIndex(where: { $0.id == source.id }) {
+        mergeSources(additions, into: &next, preservingEnabledState: false)
+        try commit(next)
+        return additions.count
+    }
+
+    func saveSource(_ source: BookSource, replacing sourceID: String?) throws {
+        var next = catalog
+        if let sourceID, !next.sources.contains(where: { $0.id == sourceID }) {
+            throw LibraryError.missingSource
+        }
+        if let index = next.sources.firstIndex(where: { $0.id == source.id }) {
+            guard source.id == sourceID else { throw LibraryError.duplicateSource }
+            next.sources[index] = source
+        } else {
+            next.sources.append(source)
+        }
+        try commit(next)
+    }
+
+    func saveSourceSubscription(_ subscription: BookSourceSubscription) throws {
+        guard !sourceSubscriptions.contains(where: { $0.url == subscription.url && $0.id != subscription.id }) else {
+            throw LibraryError.duplicateSubscription
+        }
+        var next = catalog
+        var subscriptions = sourceSubscriptions
+        var item = subscription
+        if let index = subscriptions.firstIndex(where: { $0.id == item.id }) {
+            if subscriptions[index].url != item.url {
+                item.lastRefreshedAt = nil
+                next.subscriptionSignatures?.removeValue(forKey: item.id)
+                next.pendingSubscriptionUpdates?.remove(item.id)
+            } else {
+                item.lastRefreshedAt = subscriptions[index].lastRefreshedAt
+            }
+            subscriptions[index] = item
+        } else {
+            subscriptions.append(item)
+        }
+        next.sourceSubscriptions = subscriptions
+        try commit(next)
+    }
+
+    func removeSourceSubscription(_ id: UUID) throws {
+        var next = catalog
+        next.sourceSubscriptions?.removeAll { $0.id == id }
+        next.subscriptionSignatures?.removeValue(forKey: id)
+        next.pendingSubscriptionUpdates?.remove(id)
+        try commit(next)
+    }
+
+    func previewSourceSubscription(_ url: URL) async throws -> [BookSource] {
+        try await subscriptionClient.preview(url)
+    }
+
+    func markSourceSubscriptionRefreshed(_ id: UUID, expecting url: URL? = nil) throws {
+        guard let index = sourceSubscriptions.firstIndex(where: { $0.id == id && (url == nil || $0.url == url) }) else {
+            throw LibraryError.subscriptionUnavailable
+        }
+        var next = catalog
+        next.sourceSubscriptions?[index].lastRefreshedAt = Date()
+        try commit(next)
+    }
+
+    func importSubscribedSources(_ additions: [BookSource], subscriptionID: UUID? = nil, expecting url: URL? = nil) throws -> Int {
+        guard !additions.isEmpty else { return 0 }
+        var next = catalog
+        if let subscriptionID {
+            guard let index = sourceSubscriptions.firstIndex(where: { $0.id == subscriptionID && (url == nil || $0.url == url) }) else {
+                throw LibraryError.subscriptionUnavailable
+            }
+            var signatures = next.subscriptionSignatures ?? [:]
+            for source in additions {
+                signatures[subscriptionID, default: [:]][source.id] = try sourceSignature(source)
+            }
+            next.subscriptionSignatures = signatures
+            next.sourceSubscriptions?[index].lastRefreshedAt = Date()
+            next.pendingSubscriptionUpdates?.remove(subscriptionID)
+        }
+        mergeSources(additions, into: &next, preservingEnabledState: true)
+        try commit(next)
+        return additions.count
+    }
+
+    func refreshDueSourceSubscriptions() async {
+        guard !isCheckingSubscriptions else { return }
+        isCheckingSubscriptions = true
+        defer { isCheckingSubscriptions = false }
+        for subscription in sourceSubscriptions where subscription.isDue() {
+            if Task.isCancelled { break }
+            do {
+                let remote = try await previewSourceSubscription(subscription.url)
+                try Task.checkCancellation()
+                try recordSubscriptionCheck(subscription, remote: remote)
+            } catch {
+                // A failed check leaves the last successful refresh and imported rules intact.
+                continue
+            }
+        }
+    }
+
+    private func recordSubscriptionCheck(_ checked: BookSourceSubscription, remote: [BookSource]) throws {
+        guard let index = sourceSubscriptions.firstIndex(of: checked) else { return }
+        let localByID = Dictionary(sources.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let managedSignatures = catalog.subscriptionSignatures?[checked.id] ?? [:]
+        var updatedSignatures = managedSignatures
+        var eligible: [BookSource] = []
+        var hasUnappliedChanges = false
+        for candidate in remote {
+            let local = localByID[candidate.id]
+            if let localTime = local?.lastUpdateTimestamp, let remoteTime = candidate.lastUpdateTimestamp, remoteTime < localTime {
+                continue
+            }
+            let localSignature = try local.map(sourceSignature)
+            let remoteSignature = try sourceSignature(candidate)
+            guard localSignature != remoteSignature else { continue }
+            if checked.silentUpdate, let localSignature, managedSignatures[candidate.id] == localSignature {
+                eligible.append(candidate)
+                updatedSignatures[candidate.id] = remoteSignature
+            } else {
+                hasUnappliedChanges = true
+            }
+        }
+
+        var next = catalog
+        next.sourceSubscriptions?[index].lastRefreshedAt = Date()
+        if !eligible.isEmpty {
+            mergeSources(eligible, into: &next, preservingEnabledState: true)
+            next.subscriptionSignatures?[checked.id] = updatedSignatures
+        }
+        var pending = subscriptionsWithUpdates
+        if hasUnappliedChanges { pending.insert(checked.id) }
+        else { pending.remove(checked.id) }
+        next.pendingSubscriptionUpdates = pending
+        try commit(next)
+    }
+
+    func saveFeed(_ feed: FeedSubscription) throws {
+        guard !feeds.contains(where: { $0.url == feed.url && $0.id != feed.id }) else {
+            throw LibraryError.duplicateSubscription
+        }
+        var next = catalog
+        var entries = feeds
+        if let index = entries.firstIndex(where: { $0.id == feed.id }) { entries[index] = feed }
+        else { entries.append(feed) }
+        next.feeds = entries
+        try commit(next)
+    }
+
+    func removeFeed(_ id: UUID) throws {
+        var next = catalog
+        next.feeds?.removeAll { $0.id == id }
+        try commit(next)
+    }
+
+    private func mergeSources(_ additions: [BookSource], into next: inout Catalog, preservingEnabledState: Bool) {
+        var indices = Dictionary(next.sources.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for var source in additions {
+            if let index = indices[source.id] {
+                if preservingEnabledState { source.isEnabled = next.sources[index].isEnabled }
                 next.sources[index] = source
             } else {
+                indices[source.id] = next.sources.count
                 next.sources.append(source)
             }
         }
-        try commit(next)
-        return additions.count
+    }
+
+    private func sourceSignature(_ source: BookSource) throws -> String {
+        var normalized = source
+        normalized.isEnabled = true
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        return Data(SHA256.hash(data: try encoder.encode(normalized))).base64EncodedString()
     }
 
     func setEnabled(_ enabled: Bool, for id: String) throws {
@@ -445,6 +620,9 @@ enum LibraryError: LocalizedError {
     case noChapters
     case missingChapter
     case missingSource
+    case duplicateSource
+    case duplicateSubscription
+    case subscriptionUnavailable
     case bookUnavailable
     case editionAlreadyOnShelf
     case catalogUnavailable(String)
@@ -454,6 +632,9 @@ enum LibraryError: LocalizedError {
         case .noChapters: "没有可阅读的章节。"
         case .missingChapter: "章节文件已丢失，请重新导入这本书。"
         case .missingSource: "找不到原书源。请重新导入书源以加载这一章。"
+        case .duplicateSource: "已有使用该地址的书源，请在列表中编辑它。"
+        case .duplicateSubscription: "此地址已经订阅。"
+        case .subscriptionUnavailable: "此订阅已移除。"
         case .bookUnavailable: "书架中的书籍已删除或书源已更换。"
         case .editionAlreadyOnShelf: "这个书源的版本已在书架中，可从书架单独打开。"
         case .catalogUnavailable(let detail): "无法打开书架。\(detail)"
