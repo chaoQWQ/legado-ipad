@@ -10,6 +10,8 @@ struct LibraryStorageView: View {
     @State private var isSelecting = false
     @State private var selection = Set<UUID>()
     @State private var alert: LibraryStorageAlert?
+    @State private var chapterRoute: LibraryStorageBookRoute?
+    @State private var pendingChapter: (book: LibraryBook, index: Int)?
 
     let openCachedChapter: (LibraryBook, Int) -> Void
 
@@ -47,8 +49,19 @@ struct LibraryStorageView: View {
             }
         }
         .navigationTitle("缓存管理")
-        .navigationDestination(for: LibraryStorageBookRoute.self) { item in
-            LibraryStorageChaptersView(item: item, inventory: inventory, openCachedChapter: openCachedChapter)
+        .sheet(item: $chapterRoute, onDismiss: openPendingChapter) { item in
+            NavigationStack {
+                LibraryStorageChaptersView(item: item, inventory: inventory) { book, index in
+                    guard chapterRoute?.id == item.id else { return }
+                    pendingChapter = (book, index)
+                    chapterRoute = nil
+                }
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("完成") { chapterRoute = nil }
+                    }
+                }
+            }
         }
         .toolbar { actions }
         .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -107,9 +120,19 @@ struct LibraryStorageView: View {
                         .buttonStyle(.plain)
                         .accessibilityAddTraits(selection.contains(item.id) ? .isSelected : [])
                     } else {
-                        NavigationLink(value: LibraryStorageBookRoute(book: item)) {
-                            bookRow(item)
+                        Button {
+                            chapterRoute = LibraryStorageBookRoute(book: item)
+                        } label: {
+                            HStack(spacing: 10) {
+                                bookRow(item)
+                                Image(systemName: "chevron.right")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.tertiary)
+                                    .accessibilityHidden(true)
+                            }
+                            .contentShape(Rectangle())
                         }
+                        .buttonStyle(.plain)
                         .swipeActions(allowsFullSwipe: false) {
                             if item.isOnline {
                                 Button("删除缓存", role: .destructive) { alert = .confirm(.book(item)) }
@@ -248,6 +271,14 @@ struct LibraryStorageView: View {
         }
     }
 
+    private func openPendingChapter() {
+        guard let pendingChapter else { return }
+        self.pendingChapter = nil
+        guard let book = library.currentBook(pendingChapter.book.id),
+              book.readingRevision == pendingChapter.book.readingRevision else { return }
+        openCachedChapter(book, pendingChapter.index)
+    }
+
     private enum Category: String, CaseIterable, Identifiable {
         case online = "在线缓存", local = "本地导入"
         var id: Self { self }
@@ -259,13 +290,14 @@ struct LibraryStorageView: View {
     }
 }
 
-private struct LibraryStorageBookRoute: Hashable {
-    let id: UUID
+private struct LibraryStorageBookRoute: Identifiable {
+    let id = UUID()
+    let bookID: UUID
     let revision: UUID?
     let title: String
 
     init(book: LibraryStorageBook) {
-        id = book.id
+        bookID = book.id
         revision = book.revision
         title = book.title
     }
@@ -378,10 +410,10 @@ private struct LibraryStorageChaptersView: View {
 
     private var current: LibraryStorageBook? {
         guard currentBook != nil else { return nil }
-        return inventory.snapshot?.books.first { $0.id == item.id && $0.revision == item.revision }
+        return inventory.snapshot?.books.first { $0.id == item.bookID && $0.revision == item.revision }
     }
     private var currentBook: LibraryBook? {
-        guard let book = library.currentBook(item.id), book.readingRevision == item.revision else { return nil }
+        guard let book = library.currentBook(item.bookID), book.readingRevision == item.revision else { return nil }
         return book
     }
     private var operationInProgress: Bool {
