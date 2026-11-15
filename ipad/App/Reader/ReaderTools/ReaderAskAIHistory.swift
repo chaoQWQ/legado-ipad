@@ -10,6 +10,7 @@ struct ReaderAskAIContext: Codable {
     let excerpt: String
 
     func requestText(for question: String) -> String {
+        guard !bookTitle.isEmpty else { return question }
         var parts = ["书名：\(bookTitle)"]
         if !author.isEmpty { parts.append("作者：\(author)") }
         if let sourceName, !sourceName.isEmpty { parts.append("书源：\(sourceName)") }

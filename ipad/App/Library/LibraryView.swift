@@ -44,14 +44,17 @@ struct LibraryView: View {
     @State private var isImporting = false
     @State private var sourceToEdit: SourceEditorTarget?
     @State private var showsAddressImport = false
+    @State private var showsAssistant = false
+    @State private var assistantSkillIDs: Set<String> = []
+    @State private var assistantMCPIDs: Set<String> = []
+
+    private static let assistantHistoryID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1))
 
     var body: some View {
         NavigationSplitView(preferredCompactColumn: $column) {
             List(selection: $destination) {
                 ForEach(LibraryDestination.allCases) { item in
-                    NavigationLink(value: item) {
-                        Label(item.title, systemImage: item.icon)
-                    }
+                    sidebarLink(item)
                 }
             }
             .listStyle(.sidebar)
@@ -92,6 +95,12 @@ struct LibraryView: View {
                     }
             }
         }
+        .sheet(isPresented: $showsAssistant) {
+            ReaderAskAIPanel(
+                bookID: Self.assistantHistoryID, bookTitle: "", author: "", sourceName: nil, chapterTitle: "", excerpt: "",
+                selectedSkillIDs: $assistantSkillIDs, selectedMCPIDs: $assistantMCPIDs, isGeneral: true
+            )
+        }
         #if os(iOS)
         .fullScreenCover(item: $reader) { book in
             LibraryReadingSession(bookID: book.id) { reader = nil }
@@ -127,6 +136,16 @@ struct LibraryView: View {
         } message: { book in
             let title = library.displayTitle(book.title, sourceID: book.sourceID)
             Text("将《\(title)》移出书架并清除应用内的正文、书签和阅读进度。")
+        }
+    }
+
+    @ViewBuilder private func sidebarLink(_ item: LibraryDestination) -> some View {
+        let link = NavigationLink(value: item) { Label(item.title, systemImage: item.icon) }
+        if item == .search {
+            link.simultaneousGesture(LongPressGesture().onEnded { _ in showsAssistant = true })
+                .accessibilityAction(named: "打开 AI 助手") { showsAssistant = true }
+        } else {
+            link
         }
     }
 
@@ -189,7 +208,11 @@ struct LibraryView: View {
                     Button("从网址导入", systemImage: "link") { showsAddressImport = true }
                 }
             }
-        case .search, .subscriptions, .mine:
+        case .search:
+            ToolbarItem(placement: .primaryAction) {
+                Button("AI 助手", systemImage: "sparkles") { showsAssistant = true }
+            }
+        case .subscriptions, .mine:
             ToolbarItem(placement: .primaryAction) { EmptyView() }
         }
     }

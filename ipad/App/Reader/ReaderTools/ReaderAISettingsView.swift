@@ -1,10 +1,12 @@
 import SwiftUI
 
 struct ReaderAISettingsView: View {
+    @EnvironmentObject private var library: LibraryStore
     @StateObject private var presentation = ReaderAISettingsPresentation()
     @State private var showsPrompt = false
     @State private var installsDefaultSkill = false
     @State private var installedSkillName: String?
+    private let catalogID = UUID()
 
     var body: some View {
         Group {
@@ -50,6 +52,22 @@ struct ReaderAISettingsView: View {
                 } label: {
                     LabeledContent("管理 Skill", value: skillSummary)
                 }
+                NavigationLink {
+                    ReaderAINativeToolSettingsView(presentation: presentation)
+                } label: {
+                    let tools = ReaderAINativeTools.catalog(for: catalogID, library: library, tavily: settings.tavily)
+                    let count = tools.filter { settings.disabledNativeToolNames?.contains($0.name) != true }.count
+                    LabeledContent("管理原生工具", value: "\(count) 个已启用")
+                }
+                NavigationLink("AI 工作区") { ReaderAIWorkspaceView() }
+                Stepper(value: presentation.binding(\.toolRoundLimit), in: 4...64) {
+                    LabeledContent("AI 工具轮次上限", value: "\(settings.toolRoundLimit) 轮")
+                }
+                Picker("正文问 AI 工具范围", selection: presentation.binding(\.readToolScope)) {
+                    ForEach(ReaderAIToolScope.allCases) { scope in Text(scope.title).tag(scope) }
+                }
+                Toggle("回车发送", isOn: presentation.binding(\.returnToSend))
+                Toggle("显示思考工具栏", isOn: presentation.binding(\.showsThinkingToolbar))
             } footer: {
                 if let installedSkillName {
                     Text("已安装「\(installedSkillName)」。")
@@ -87,6 +105,16 @@ struct ReaderAISettingsView: View {
                     LabeledContent("图像生成提供商管理", value: "\(settings.imageProviders.count)")
                 }
             }
+            Section("MCP 服务器") {
+                NavigationLink("添加 MCP 服务器") { ReaderAIMCPAddServerView(presentation: presentation) }
+                NavigationLink {
+                    ReaderAIMCPSettingsView(presentation: presentation)
+                } label: {
+                    let count = settings.mcpServers.filter(\.enabled).count
+                    LabeledContent("管理 MCP 服务器", value: settings.mcpServers.isEmpty ? "暂无" : "\(count) 个已启用")
+                }
+            }
+            ReaderAITavilySettingsView(presentation: presentation)
             Section {
                 Button {
                     showsPrompt = true

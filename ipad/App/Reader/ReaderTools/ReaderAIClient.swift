@@ -24,12 +24,23 @@ enum ReaderAIClient {
     static func chat(
         messages: [ReaderAIChatMessage], using choice: ReaderAIModelChoice,
         skills: [ReaderAISkill] = [],
+        tools: [ReaderAITool] = [],
+        toolRoundLimit: Int = 32,
+        allowsTextOnlyFallback: Bool = false,
+        onProgress: @MainActor (ReaderAIToolProgress) -> Void = { _ in },
         onDelta: @MainActor (String) -> Void = { _ in }
     ) async throws -> String {
         guard !choice.model.isEmpty else { throw ReaderAIError.missingSettings }
         let provider = choice.provider
         let mode = provider.apiMode
         let skillTool = ReaderAISkillTool(skills)
+        let available = (skillTool.skills.isEmpty ? [] : [skillTool.tool]) + tools
+        var dispatched: [String: ReaderAITool] = [:]
+        let uniqueTools = available.filter { tool in
+            guard dispatched[tool.name] == nil else { return false }
+            dispatched[tool.name] = tool
+            return true
+        }
         var fields: [[String: Any]] = messages.filter { !$0.content.aiTrimmed.isEmpty }.map {
             ["role": $0.role.rawValue, "content": $0.content]
         }
@@ -41,27 +52,44 @@ enum ReaderAIClient {
         if !skillTool.skills.isEmpty {
             let priorSystem = fields.prefix { $0["role"] as? String == "system" }.count
             fields.insert(["role": "system", "content": skillTool.catalog], at: priorSystem)
-            body["tools"] = [skillTool.definition(for: mode)]
+        }
+        if !uniqueTools.isEmpty {
+            body["tools"] = uniqueTools.map { $0.definition(for: mode) }
             body["tool_choice"] = "auto"
         }
         var answer = ""
-        let maxToolRounds = 4
+        let maxToolRounds = min(64, max(4, toolRoundLimit))
         for round in 0...maxToolRounds {
             try Task.checkCancellation()
+            if round == maxToolRounds {
+                body.removeValue(forKey: "tools")
+                body.removeValue(forKey: "tool_choice")
+                fields.append([
+                    "role": "system",
+                    "content": "The tool limit has been reached. Answer using the completed results and identify any unfinished work."
+                ])
+            }
             body[inputKey] = fields
             let request = try request(
                 address: provider.address, route: mode.route, key: provider.key, headers: provider.headers,
                 timeout: 300, body: body, accept: "text/event-stream, application/json"
             )
-            let response = try await chatTurn(request, onDelta: onDelta)
+            await onProgress(.thinking)
+            let response: ChatStream
+            do {
+                response = try await chatTurn(request, onDelta: onDelta)
+            } catch let error as ReaderAIError where round == 0 && allowsTextOnlyFallback
+                && skillTool.skills.isEmpty && !tools.isEmpty && error.meansToolsUnsupported {
+                return try await chat(messages: messages, using: choice, onProgress: onProgress, onDelta: onDelta)
+            }
             answer.append(response.text)
             let calls = response.toolCalls
             guard !calls.isEmpty else {
                 guard !response.text.aiTrimmed.isEmpty else { throw ReaderAIError.emptyResponse }
                 return answer.aiTrimmed
             }
-            guard !skillTool.skills.isEmpty, calls.count <= 12, round < maxToolRounds else {
-                throw ReaderAIError.provider("AI 未能完成本轮 Skill 调用。")
+            guard !dispatched.isEmpty, calls.count <= 16, round < maxToolRounds else {
+                throw ReaderAIError.provider("AI 未能完成工具调用。")
             }
             if mode == .chatCompletions {
                 let content: Any = response.text.isEmpty ? NSNull() as Any : response.text
@@ -74,15 +102,36 @@ enum ReaderAIClient {
                 if !response.text.isEmpty { fields.append(["role": "assistant", "content": response.text]) }
                 fields.append(contentsOf: calls.map(\.responsesItem))
             }
-            fields.append(contentsOf: try calls.map { call in
-                try call.output(skillTool.result(for: call), for: mode)
-            })
+            for call in calls {
+                try Task.checkCancellation()
+                await onProgress(.calling(id: call.id, name: call.name))
+                let result = try await run(call, using: dispatched[call.name])
+                let status = object(Data(result.utf8))
+                let reportedFailure = (status?["ok"] as? Bool == false) || (status?["isError"] as? Bool == true)
+                await onProgress(.completed(id: call.id, succeeded: !reportedFailure))
+                fields.append(call.output(result, for: mode))
+            }
             if !response.text.isEmpty {
                 answer.append("\n\n")
                 await onDelta("\n\n")
             }
         }
         throw ReaderAIError.emptyResponse
+    }
+
+    private static func run(_ call: ReaderAISkillTool.Call, using tool: ReaderAITool?) async throws -> String {
+        guard let tool else { return ReaderAITool.failure("This tool is unavailable in the current window.") }
+        guard call.arguments.utf8.count <= 768 * 1024 else { return ReaderAITool.failure("Tool input is too large.") }
+        do {
+            let result = try await tool.invoke(call.arguments)
+            try Task.checkCancellation()
+            return result.utf8.count <= 768 * 1024 ? result : ReaderAITool.failure("Tool result is too large. Narrow the request.")
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            try Task.checkCancellation()
+            return ReaderAITool.failure(error.localizedDescription)
+        }
     }
 
     private static func chatTurn(_ request: URLRequest, onDelta: @MainActor (String) -> Void) async throws -> ChatStream {
@@ -550,5 +599,14 @@ enum ReaderAIClient {
             let sameMethod = task.originalRequest?.httpMethod == request.httpMethod
             completionHandler((sameOrigin || safeMediaRedirect) && sameMethod ? request : nil)
         }
+    }
+}
+
+private extension ReaderAIError {
+    var meansToolsUnsupported: Bool {
+        guard case .http(let status, let message) = self, status == 400 || status == 422,
+              let message = message?.lowercased() else { return false }
+        return (message.contains("tool") || message.contains("function calling"))
+            && (message.contains("not support") || message.contains("unsupported"))
     }
 }

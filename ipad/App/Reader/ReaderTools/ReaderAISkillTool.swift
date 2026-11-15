@@ -14,34 +14,30 @@ struct ReaderAISkillTool {
             "- id: \(skill.id)\n  name: \(skill.name.prefix(200))\n  description: \(skill.description.prefix(640))"
         }.joined(separator: "\n")
         return """
-            Agent skills are available for this window. Use load_ai_skill only when a skill is relevant, then use the returned text as task guidance. Skills cannot run scripts or access files or tools other than those explicitly available to you.
+            Agent skills are available for this window. Use load_ai_skill only when a skill is relevant, then use the returned text as task guidance. Some upstream guides describe external tools or files. Use only the tools actually provided and ask for missing input. For a book source, use supplied HTML or JSON fixtures for validation and save the draft inside the AI workspace. Do not claim a live check was performed when using a fixture.
             Available skills:
             \(availability)
             """
     }
 
-    func definition(for mode: ReaderAIAPIMode) -> [String: Any] {
-        let function: [String: Any] = [
-            "name": Self.name,
-            "description": "Load one selected AI skill prompt on demand. The result is instruction text only.",
-            "parameters": [
+    var tool: ReaderAITool {
+        ReaderAITool(
+            name: Self.name,
+            description: "Load one selected AI skill prompt on demand. The result is instruction text only.",
+            parameters: [
                 "type": "object",
                 "properties": [
                     "skillId": ["type": "string", "description": "Skill id from the available catalog."],
                     "name": ["type": "string", "description": "Skill name from the available catalog."]
                 ],
                 "additionalProperties": false
-            ]
-        ]
-        if mode == .chatCompletions { return ["type": "function", "function": function] }
-        return function.merging(["type": "function", "strict": false]) { current, _ in current }
+            ], invoke: result
+        )
     }
 
-    func result(for call: Call) throws -> String {
+    private func result(for arguments: String) throws -> String {
         let result: [String: Any]
-        if call.name != Self.name {
-            result = ["ok": false, "error": "Only load_ai_skill is available."]
-        } else if let skill = resolve(arguments: call.arguments) {
+        if let skill = resolve(arguments: arguments) {
             result = [
                 "ok": true, "skillId": skill.id, "name": skill.name, "description": skill.description,
                 "sourceUrl": skill.sourceURL, "content": skill.content, "scriptsSupported": false
@@ -49,8 +45,7 @@ struct ReaderAISkillTool {
         } else {
             result = ["ok": false, "error": "Pass the skillId or name of a skill available in this window."]
         }
-        let data = try JSONSerialization.data(withJSONObject: result, options: [.withoutEscapingSlashes])
-        return String(decoding: data, as: UTF8.self)
+        return try ReaderAITool.json(result)
     }
 
     private func resolve(arguments: String) -> ReaderAISkill? {

@@ -8,7 +8,9 @@ import AppKit
 
 struct ReaderAskAIPanel: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var library: LibraryStore
     @Binding private var windowSkillIDs: Set<String>
+    @Binding private var windowMCPIDs: Set<String>
     @StateObject private var session: ReaderAskAISession
     @State private var showsHistory = false
     @State private var activeSheet: PanelSheet?
@@ -20,15 +22,19 @@ struct ReaderAskAIPanel: View {
 
     init(
         bookID: UUID, bookTitle: String, author: String, sourceName: String?, chapterTitle: String, excerpt: String,
-        selectedSkillIDs: Binding<Set<String>>
+        selectedSkillIDs: Binding<Set<String>>, selectedMCPIDs: Binding<Set<String>> = .constant([]),
+        isGeneral: Bool = false
     ) {
         let context = ReaderAskAIContext(
             bookTitle: bookTitle, author: author, sourceName: sourceName,
             chapterTitle: chapterTitle, excerpt: excerpt
         )
         _windowSkillIDs = selectedSkillIDs
+        _windowMCPIDs = selectedMCPIDs
+        _expandsPanel = State(initialValue: isGeneral)
         _session = StateObject(wrappedValue: ReaderAskAISession(
-            bookID: bookID, context: context, initialSkillIDs: selectedSkillIDs.wrappedValue
+            bookID: bookID, context: context, initialSkillIDs: selectedSkillIDs.wrappedValue,
+            initialMCPIDs: selectedMCPIDs.wrappedValue, isGeneral: isGeneral
         ))
     }
 
@@ -47,6 +53,7 @@ struct ReaderAskAIPanel: View {
                         Divider()
                         transcript
                         Divider()
+                        if session.showsThinkingToolbar, !session.toolActivity.isEmpty { toolActivity }
                         composer
                     }
                 }
@@ -61,15 +68,16 @@ struct ReaderAskAIPanel: View {
                             .background(.regularMaterial)
                     }
                 }
-                .navigationTitle(showsHistory ? "本书对话历史" : "问 AI")
+                .navigationTitle(showsHistory ? historyTitle : (session.isGeneral ? "AI 助手" : "问 AI"))
                 #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
                 #endif
                 .toolbar { toolbar }
             }
         }
-        .task { session.load() }
+        .task { session.load(library: library) }
         .onChange(of: session.selectedSkillIDs) { _, ids in windowSkillIDs = ids }
+        .onChange(of: session.selectedMCPIDs) { _, ids in windowMCPIDs = ids }
         .onDisappear { session.stop() }
         .sheet(item: $activeSheet) { sheet in
             switch sheet {
@@ -82,13 +90,26 @@ struct ReaderAskAIPanel: View {
                     selection: session.selectedSkillIDs,
                     apply: session.chooseSkills
                 )
+            case .mcp:
+                ReaderAskAIMCPPicker(
+                    servers: session.availableMCPServers,
+                    selection: session.selectedMCPIDs, apply: session.chooseMCPServers
+                )
+            case .workspace:
+                NavigationStack {
+                    ReaderAIWorkspaceView().toolbar {
+                        ToolbarItem(placement: .confirmationAction) { Button("完成") { activeSheet = nil } }
+                    }
+                }
             }
         }
-        .alert("清空本书的所有问 AI 对话？", isPresented: $confirmsClear) {
-            Button("清空本书历史", role: .destructive) { session.clearHistory() }
+        .alert("清空所有\(historyTitle)？", isPresented: $confirmsClear) {
+            Button("清空历史", role: .destructive) { session.clearHistory() }
             Button("取消", role: .cancel) {}
         }
     }
+
+    private var historyTitle: String { session.isGeneral ? "对话历史" : "本书对话历史" }
 
     @ViewBuilder
     private func presentation<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
@@ -119,7 +140,7 @@ struct ReaderAskAIPanel: View {
                     showsHistory = false
                     followsLatest = true
                 }
-                Button(showsHistory ? "返回对话" : "本书对话历史", systemImage: "clock.arrow.circlepath") {
+                Button(showsHistory ? "返回对话" : historyTitle, systemImage: "clock.arrow.circlepath") {
                     composerFocused = false
                     showsHistory.toggle()
                 }
@@ -129,6 +150,13 @@ struct ReaderAskAIPanel: View {
                     activeSheet = .skills
                 }
                 .disabled(session.isRequesting)
+                Button("当前窗口 MCP（\(session.selectedMCPIDs.count)）", systemImage: "server.rack") {
+                    composerFocused = false
+                    session.reloadSettings()
+                    activeSheet = .mcp
+                }
+                .disabled(session.isRequesting)
+                Button("AI 工作区", systemImage: "folder") { activeSheet = .workspace }
                 #if os(iOS)
                 if #available(iOS 18.0, *) {
                     Button(
@@ -148,7 +176,7 @@ struct ReaderAskAIPanel: View {
     private var contextBar: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Text(session.context.bookTitle)
+                Text(session.isGeneral ? "当前模型" : session.context.bookTitle)
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -323,9 +351,8 @@ struct ReaderAskAIPanel: View {
         VStack(alignment: .leading, spacing: 8) {
             if let destination = session.destination {
                 HStack(alignment: .bottom, spacing: 10) {
-                    TextField("问 AI", text: $session.draft, axis: .vertical)
+                    messageField
                         .textFieldStyle(.roundedBorder)
-                        .lineLimit(1...5)
                         .focused($composerFocused)
                         .onKeyPress(.return, phases: .down) { press in
                             guard press.modifiers.contains(.command), session.hasDraft, !session.isRequesting else {
@@ -360,10 +387,44 @@ struct ReaderAskAIPanel: View {
         .frame(maxWidth: .infinity, alignment: .center)
     }
 
+    @ViewBuilder private var messageField: some View {
+        if session.returnToSend {
+            TextField("问 AI", text: $session.draft)
+                .submitLabel(.send)
+                .onSubmit { if session.hasDraft && !session.isRequesting { session.send() } }
+        } else {
+            TextField("问 AI", text: $session.draft, axis: .vertical).lineLimit(1...5)
+        }
+    }
+
+    private var toolActivity: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                ForEach(session.toolActivity.suffix(12)) { activity in
+                    Label {
+                        Text(activity.name).font(.caption.monospaced())
+                    } icon: {
+                        if let succeeded = activity.succeeded {
+                            Image(systemName: succeeded ? "checkmark.circle" : "exclamationmark.circle")
+                        } else {
+                            ProgressView().controlSize(.small)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(.quaternary, in: Capsule())
+                }
+            }
+            .padding(.horizontal, 20)
+        }
+        .padding(.vertical, 6)
+        .accessibilityLabel("工具调用过程")
+    }
+
     private var historyList: some View {
         Group {
             if session.history.conversations.isEmpty {
-                ContentUnavailableView("本书暂无问 AI 历史", systemImage: "clock.arrow.circlepath")
+                ContentUnavailableView(session.isGeneral ? "暂无对话" : "本书暂无问 AI 历史", systemImage: "clock.arrow.circlepath")
             } else {
                 List {
                     ForEach(session.history.conversations) { conversation in
@@ -406,9 +467,60 @@ struct ReaderAskAIPanel: View {
     private enum ScrollTarget { case latest }
 
     private enum PanelSheet: Identifiable {
-        case settings, skills
+        case settings, skills, mcp, workspace
 
         var id: Self { self }
+    }
+}
+
+private struct ReaderAskAIMCPPicker: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var selection: Set<String>
+    let servers: [ReaderAIMCPServer]
+    let apply: (Set<String>) -> Void
+
+    init(servers: [ReaderAIMCPServer], selection: Set<String>, apply: @escaping (Set<String>) -> Void) {
+        self.servers = servers
+        self.apply = apply
+        _selection = State(initialValue: selection)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if servers.isEmpty {
+                    ContentUnavailableView("没有已启用 MCP", systemImage: "server.rack",
+                                           description: Text("请在 AI 设置中添加或启用 MCP 服务器。"))
+                } else {
+                    List {
+                        Section {
+                            ForEach(servers) { server in
+                                Toggle(server.name, isOn: Binding {
+                                    selection.contains(server.id)
+                                } set: { isSelected in
+                                    if isSelected { selection.insert(server.id) }
+                                    else { selection.remove(server.id) }
+                                })
+                            }
+                        } footer: {
+                            Text("所选 MCP 只用于当前窗口。调用时会将参数发送给对应服务器。")
+                        }
+                        Button("清空选择", role: .destructive) { apply([]); dismiss() }
+                            .disabled(selection.isEmpty)
+                    }
+                }
+            }
+            .navigationTitle("当前窗口 MCP")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") {
+                        apply(selection)
+                        dismiss()
+                    }
+                }
+            }
+        }
     }
 }
 

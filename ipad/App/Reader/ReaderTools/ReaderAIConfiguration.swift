@@ -99,9 +99,49 @@ struct ReaderAISettings: Codable, Sendable {
     var imageProviderID: String?
     var askPrompt = Self.defaultAskPrompt
     var skills: [ReaderAISkill] = []
+    private var configuredMCPServers: [ReaderAIMCPServer]?
+    var disabledNativeToolNames: Set<String>?
+    var configuredToolRoundLimit: Int?
+    var configuredReadToolScope: ReaderAIToolScope?
+    var configuredReturnToSend: Bool?
+    var configuredThinkingToolbar: Bool?
+    private var configuredTavily: ReaderAITavilyConfig?
 
     private enum CodingKeys: String, CodingKey {
         case enabled, providers, models, imageProviders, defaultModelID, askModelID, imageProviderID, askPrompt
+        case configuredMCPServers, disabledNativeToolNames, configuredToolRoundLimit, configuredReadToolScope
+        case configuredReturnToSend, configuredThinkingToolbar
+        case configuredTavily
+    }
+
+    var mcpServers: [ReaderAIMCPServer] {
+        get { configuredMCPServers ?? [] }
+        set { configuredMCPServers = newValue }
+    }
+
+    var toolRoundLimit: Int {
+        get { min(64, max(4, configuredToolRoundLimit ?? 32)) }
+        set { configuredToolRoundLimit = min(64, max(4, newValue)) }
+    }
+
+    var readToolScope: ReaderAIToolScope {
+        get { configuredReadToolScope ?? .enabled }
+        set { configuredReadToolScope = newValue }
+    }
+
+    var returnToSend: Bool {
+        get { configuredReturnToSend ?? true }
+        set { configuredReturnToSend = newValue }
+    }
+
+    var showsThinkingToolbar: Bool {
+        get { configuredThinkingToolbar ?? true }
+        set { configuredThinkingToolbar = newValue }
+    }
+
+    var tavily: ReaderAITavilyConfig {
+        get { configuredTavily ?? .init() }
+        set { configuredTavily = newValue }
     }
 
     var questionChoices: [ReaderAIModelChoice] {
@@ -117,6 +157,11 @@ struct ReaderAISettings: Codable, Sendable {
         return choices.first(where: { $0.id == askModelID })
             ?? choices.first(where: { $0.id == defaultModelID })
             ?? choices.first
+    }
+
+    var defaultChatChoice: ReaderAIModelChoice? {
+        let choices = questionChoices
+        return choices.first(where: { $0.id == defaultModelID }) ?? choices.first
     }
 
     var enabledImageProviders: [ReaderAIImageProvider] { imageProviders.filter(\.enabled) }
