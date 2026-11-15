@@ -172,6 +172,7 @@ enum ReaderAIClient {
             let reserved: Set<String> = ["endpoint", "model", "input", "tools", "stream", "response", "tool", "type"]
             tool.merge(params.filter { !reserved.contains($0.key) }) { _, new in new }
             tool["type"] = "image_generation"
+            if let imageModel = provider.resolvedImageToolModel(parameters: params) { tool["model"] = imageModel }
             var payload: [String: Any] = ["model": model, "input": effectivePrompt, "tools": [tool]]
             let extra = params["response"] as? [String: Any] ?? [:]
             payload.merge(extra.filter { !["model", "input", "tools", "stream"].contains($0.key) }) { _, new in new }
@@ -181,7 +182,8 @@ enum ReaderAIClient {
             var payload: [String: Any] = [
                 "model": model, "prompt": effectivePrompt, "n": 1, "size": "1024x1024"
             ]
-            payload.merge(params.filter { !["endpoint", "model", "prompt"].contains($0.key) }) { _, new in new }
+            let reserved: Set<String> = ["endpoint", "model", "prompt", "tool", "response"]
+            payload.merge(params.filter { !reserved.contains($0.key) }) { _, new in new }
             body = payload
         }
 

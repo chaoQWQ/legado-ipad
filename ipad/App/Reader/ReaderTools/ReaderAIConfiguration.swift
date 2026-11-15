@@ -44,6 +44,7 @@ struct ReaderAIImageProvider: Codable, Equatable, Identifiable, Sendable {
     var key = ""
     var headers = ""
     var model = ""
+    var imageToolModel: String?
     var parametersJSON = ""
     var stylePrompt = ""
     var timeoutMilliseconds = 120_000
@@ -55,7 +56,13 @@ struct ReaderAIImageProvider: Codable, Equatable, Identifiable, Sendable {
         return URL(string: address)?.host ?? "生图供应商"
     }
 
-    var resolvedModelName: String { resolvedModel(parameters: (try? parameters()) ?? [:]) }
+    var resolvedModelName: String {
+        let parameters = (try? parameters()) ?? [:]
+        if usesResponses(parameters: parameters), let imageModel = resolvedImageToolModel(parameters: parameters) {
+            return imageModel
+        }
+        return resolvedModel(parameters: parameters)
+    }
 
     func usesResponses(parameters: [String: Any]) -> Bool {
         if let route = parameters["endpoint"] as? String { return route.aiTrimmed.lowercased() == "responses" }
@@ -64,8 +71,15 @@ struct ReaderAIImageProvider: Codable, Equatable, Identifiable, Sendable {
 
     func resolvedModel(parameters: [String: Any]) -> String {
         let candidates = [model, parameters["model"] as? String ?? ""]
-        return candidates.map(\.aiTrimmed).first { !$0.isEmpty }
-            ?? (usesResponses(parameters: parameters) ? "gpt-5" : "gpt-image-1")
+        if let explicit = candidates.map(\.aiTrimmed).first(where: { !$0.isEmpty }) { return explicit }
+        if usesResponses(parameters: parameters) { return "gpt-5" }
+        let official = URLComponents(string: address.aiTrimmed)?.host?.lowercased() == "api.openai.com"
+        return official ? "gpt-image-2.6-flare" : "gpt-image-1"
+    }
+
+    func resolvedImageToolModel(parameters: [String: Any]) -> String? {
+        let candidates = [imageToolModel, (parameters["tool"] as? [String: Any])?["model"] as? String]
+        return candidates.compactMap { $0?.aiTrimmed }.first { !$0.isEmpty }
     }
 
     func parameters() throws -> [String: Any] {

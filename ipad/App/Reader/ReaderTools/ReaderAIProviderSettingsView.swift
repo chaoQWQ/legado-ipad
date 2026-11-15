@@ -154,7 +154,7 @@ private struct ReaderAIProviderEditor: View {
                 }
             }
             .sheet(isPresented: $showsCatalog) {
-                ReaderAIModelCatalogView(provider: draft, existingModels: Set(models.map(\.model))) { modelIDs in
+                ReaderAIModelCatalogView(provider: draft, selection: .adding(excluding: Set(models.map(\.model)))) { modelIDs in
                     models.append(contentsOf: modelIDs.map { ReaderAIModel(providerID: draft.id, model: $0) })
                 }
             }
@@ -288,7 +288,17 @@ struct ReaderAIEndpointPreview: View {
     }
 }
 
-private struct ReaderAIModelCatalogView: View {
+struct ReaderAIModelCatalogView: View {
+    enum Selection {
+        case adding(excluding: Set<String>)
+        case choosing(current: String)
+
+        var excludedModels: Set<String> {
+            if case .adding(let excluded) = self { return excluded }
+            return []
+        }
+    }
+
     @Environment(\.dismiss) private var dismiss
     @State private var modelIDs: [String] = []
     @State private var selected = Set<String>()
@@ -298,8 +308,8 @@ private struct ReaderAIModelCatalogView: View {
     @State private var errorMessage: String?
 
     let provider: ReaderAIProvider
-    let existingModels: Set<String>
-    let add: ([String]) -> Void
+    let selection: Selection
+    let apply: ([String]) -> Void
 
     var body: some View {
         NavigationStack {
@@ -310,21 +320,16 @@ private struct ReaderAIModelCatalogView: View {
                     ContentUnavailableView {
                         Label("无法获取模型", systemImage: "exclamationmark.circle")
                     } description: {
-                        Text(errorMessage)
+                        Text("\(errorMessage)\n也可以返回手动填写模型 ID。")
                     } actions: {
                         Button("重试") { reloadID += 1 }
                     }
                 } else if modelIDs.isEmpty {
-                    ContentUnavailableView("没有可添加的模型", systemImage: "text.badge.plus")
+                    ContentUnavailableView("没有可选的模型", systemImage: "text.badge.plus")
                 } else {
                     List {
                         ForEach(filteredModels, id: \.self) { model in
-                            Toggle(model, isOn: Binding(
-                                get: { selected.contains(model) },
-                                set: { enabled in
-                                    if enabled { selected.insert(model) } else { selected.remove(model) }
-                                }
-                            ))
+                            modelRow(model)
                         }
                     }
                     .searchable(text: $query, prompt: "搜索模型 ID")
@@ -339,15 +344,42 @@ private struct ReaderAIModelCatalogView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("取消") { dismiss() }
                 }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(selected.isEmpty ? "添加" : "添加（\(selected.count)）") {
-                        add(modelIDs.filter { selected.contains($0) })
-                        dismiss()
+                if case .adding = selection {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button(selected.isEmpty ? "添加" : "添加（\(selected.count)）") {
+                            apply(modelIDs.filter { selected.contains($0) })
+                            dismiss()
+                        }
+                        .disabled(selected.isEmpty)
                     }
-                    .disabled(selected.isEmpty)
                 }
             }
             .task(id: reloadID, load)
+        }
+    }
+
+    @ViewBuilder private func modelRow(_ model: String) -> some View {
+        switch selection {
+        case .adding:
+            Toggle(model, isOn: Binding {
+                selected.contains(model)
+            } set: { enabled in
+                if enabled { selected.insert(model) } else { selected.remove(model) }
+            })
+        case .choosing(let current):
+            Button {
+                apply([model])
+                dismiss()
+            } label: {
+                LabeledContent {
+                    if model == current { Image(systemName: "checkmark").foregroundStyle(Color.accentColor) }
+                } label: {
+                    Text(verbatim: model).foregroundStyle(.primary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityAddTraits(model == current ? .isSelected : [])
         }
     }
 
@@ -362,7 +394,7 @@ private struct ReaderAIModelCatalogView: View {
         do {
             let ids = try await ReaderAIClient.models(provider: provider)
             try Task.checkCancellation()
-            modelIDs = Set(ids).subtracting(existingModels).sorted()
+            modelIDs = Set(ids).subtracting(selection.excludedModels).sorted()
             isLoading = false
         } catch {
             guard !Task.isCancelled else { return }

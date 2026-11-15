@@ -117,11 +117,18 @@ private struct ReaderAIImageProviderEditor: View {
     @Environment(\.dismiss) private var dismiss
     @State private var draft: ReaderAIImageProvider
     @State private var errorMessage: String?
+    @State private var modelPicker: ModelField?
     let isNew: Bool
     let save: (ReaderAIImageProvider) throws -> Void
 
     private enum ImageAPI {
         case images, responses
+    }
+
+    private enum ModelField: String, Identifiable {
+        case main, imageTool
+
+        var id: Self { self }
     }
 
     init(provider: ReaderAIImageProvider, isNew: Bool, save: @escaping (ReaderAIImageProvider) throws -> Void) {
@@ -143,22 +150,20 @@ private struct ReaderAIImageProviderEditor: View {
                         Text("Images API").tag(ImageAPI.images)
                         Text("Responses").tag(ImageAPI.responses)
                     }
+                } header: {
+                    Text("调用接口")
+                }
+                modelSection
+                Section("请求配置") {
                     if let parameters = try? draft.parameters() {
                         ReaderAIEndpointPreview(
                             address: draft.address,
                             route: draft.usesResponses(parameters: parameters) ? "responses" : "images/generations"
                         )
                     }
-                    TextField("模型 ID", text: $draft.model)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
                     Stepper(value: timeout, in: 60...600, step: 15) {
                         LabeledContent("请求超时", value: "\(timeout.wrappedValue) 秒")
                     }
-                } header: {
-                    Text("调用接口")
-                } footer: {
-                    Text("模型 ID 留空时使用该接口的默认模型。")
                 }
                 ReaderAISettingsHeadersField(headers: $draft.headers)
                 Section {
@@ -190,6 +195,57 @@ private struct ReaderAIImageProviderEditor: View {
                 }
             }
             .readerAISettingsError($errorMessage)
+            .sheet(item: $modelPicker) { field in
+                let provider = ReaderAIProvider(address: draft.address, key: draft.key, headers: draft.headers)
+                let current = field == .main ? requestModel : (toolModel ?? "")
+                ReaderAIModelCatalogView(provider: provider, selection: .choosing(current: current)) { models in
+                    guard let model = models.first else { return }
+                    switch field {
+                    case .main: draft.model = model
+                    case .imageTool: draft.imageToolModel = model
+                    }
+                }
+            }
+        }
+    }
+
+    private var usesResponses: Bool { imageAPI.wrappedValue == .responses }
+    private var requestModel: String { draft.resolvedModel(parameters: (try? draft.parameters()) ?? [:]) }
+    private var toolModel: String? { draft.resolvedImageToolModel(parameters: (try? draft.parameters()) ?? [:]) }
+
+    private var modelSection: some View {
+        Section {
+            modelField(usesResponses ? "主模型 ID" : "生图模型 ID", text: $draft.model, suggested: requestModel)
+            Button(usesResponses ? "从接口列表选择主模型" : "从接口列表选择生图模型", systemImage: "list.bullet") {
+                modelPicker = .main
+            }
+            .disabled(draft.address.aiTrimmed.isEmpty)
+            if usesResponses {
+                modelField("生图模型 ID", text: Binding {
+                    draft.imageToolModel ?? ""
+                } set: { value in
+                    draft.imageToolModel = value
+                }, suggested: toolModel ?? "由服务决定")
+                Button("从接口列表选择生图模型", systemImage: "list.bullet") { modelPicker = .imageTool }
+                    .disabled(draft.address.aiTrimmed.isEmpty)
+            }
+        } header: {
+            Text("模型")
+        } footer: {
+            if usesResponses {
+                Text("主模型需要支持调用生图工具。生图模型留空时，沿用默认参数里的 tool.model 或由服务决定。")
+            } else {
+                Text("选择供应商支持的生图模型。也可以手填模型 ID，例如供应商没有提供模型列表时。")
+            }
+        }
+    }
+
+    private func modelField(_ label: String, text: Binding<String>, suggested: String) -> some View {
+        LabeledContent(label) {
+            TextField(label, text: text, prompt: Text(verbatim: suggested))
+                .multilineTextAlignment(.trailing)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
         }
     }
 
@@ -222,6 +278,8 @@ private struct ReaderAIImageProviderEditor: View {
             draft.name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
             draft.address = draft.address.trimmingCharacters(in: .whitespacesAndNewlines)
             draft.model = draft.model.trimmingCharacters(in: .whitespacesAndNewlines)
+            let imageModel = draft.imageToolModel?.aiTrimmed ?? ""
+            draft.imageToolModel = imageModel.isEmpty ? nil : imageModel
             try save(draft)
             dismiss()
         } catch {
