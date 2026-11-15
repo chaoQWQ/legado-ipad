@@ -32,8 +32,18 @@ struct ReaderInteractionPreferences: Equatable {
     var tapPrevious: ReaderTapAction = .previousPage
     var tapCenter: ReaderTapAction = .showControls
     var tapNext: ReaderTapAction = .nextPage
+    var tapTop: ReaderTapAction = .showControls
+    var tapBottom: ReaderTapAction = .showControls
     var swipeThreshold = 0.0
     var animatesScrollTaps = true
+
+    func tapAction(at point: CGPoint, in size: CGSize, mode: ReaderPageMode) -> ReaderTapAction {
+        if point.x < size.width / 3 { return tapPrevious }
+        if point.x > size.width * 2 / 3 { return tapNext }
+        if point.y < size.height / 3 { return mode == .scroll ? tapPrevious : tapTop }
+        if point.y > size.height * 2 / 3 { return mode == .scroll ? tapNext : tapBottom }
+        return tapCenter
+    }
 }
 
 #if os(iOS)

@@ -307,6 +307,17 @@ struct ReaderBehavior: Codable, Equatable {
     var tapPrevious: ReaderTapAction = .previousPage
     var tapCenter: ReaderTapAction = .showControls
     var tapNext: ReaderTapAction = .nextPage
+    // Optional so saved settings from before the vertical zones were split still decode.
+    private var tapTopOverride: ReaderTapAction?
+    private var tapBottomOverride: ReaderTapAction?
+    var tapTop: ReaderTapAction {
+        get { tapTopOverride ?? .showControls }
+        set { tapTopOverride = newValue }
+    }
+    var tapBottom: ReaderTapAction {
+        get { tapBottomOverride ?? .showControls }
+        set { tapBottomOverride = newValue }
+    }
     var menuOpacity: Double = 1
     var animatesScrollTaps = true
     var showsChapterAccessory = true

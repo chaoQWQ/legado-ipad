@@ -360,11 +360,7 @@ final class ReaderPagingViewport: UIView, UIGestureRecognizerDelegate {
     }
 
     private func tapAction(at point: CGPoint) -> ReaderTapAction {
-        if point.x < bounds.width / 3 { return interaction.tapPrevious }
-        if point.x > bounds.width * 2 / 3 { return interaction.tapNext }
-        if point.y < bounds.height / 3 { return interaction.tapPrevious }
-        if point.y > bounds.height * 2 / 3 { return interaction.tapNext }
-        return interaction.tapCenter
+        interaction.tapAction(at: point, in: bounds.size, mode: mode)
     }
 
     private func startAnimation(

@@ -223,10 +223,16 @@ struct ReaderBehaviorConfigurationView: View {
                         value == 0 ? "默认" : "\(value.formatted()) 点"
                     }
                 }
-                Section("点按区域") {
-                    configurationPicker("左侧和上方", selection: $behavior.tapPrevious, title: { $0.title })
+                Section {
+                    configurationPicker("左侧", selection: $behavior.tapPrevious, title: { $0.title })
                     configurationPicker("正中央", selection: $behavior.tapCenter, title: { $0.title })
-                    configurationPicker("右侧和下方", selection: $behavior.tapNext, title: { $0.title })
+                    configurationPicker("右侧", selection: $behavior.tapNext, title: { $0.title })
+                    configurationPicker("上方", selection: $behavior.tapTop, title: { $0.title })
+                    configurationPicker("下方", selection: $behavior.tapBottom, title: { $0.title })
+                } header: {
+                    Text("点按区域")
+                } footer: {
+                    Text("上方和下方指正文中间一列的上下两端。这两项设置用于左右翻页。")
                 }
                 Section("阅读工具栏") {
                     ReaderMetricControl("菜单不透明度", value: $behavior.menuOpacity, range: 0.35...1, step: 0.05, accent: palette.accent) { value in

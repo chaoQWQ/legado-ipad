@@ -381,6 +381,8 @@ struct ReaderView: View {
                             tapPrevious: behavior.tapPrevious,
                             tapCenter: behavior.tapCenter,
                             tapNext: behavior.tapNext,
+                            tapTop: behavior.tapTop,
+                            tapBottom: behavior.tapBottom,
                             swipeThreshold: behavior.swipeThreshold,
                             animatesScrollTaps: behavior.animatesScrollTaps && !reduceMotion
                         ),
