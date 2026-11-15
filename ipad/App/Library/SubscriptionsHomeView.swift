@@ -1,20 +1,43 @@
 import BookSources
 import SwiftUI
+#if os(iOS)
+import SafariServices
+#endif
 
 struct SubscriptionsHomeView: View {
     @EnvironmentObject private var library: LibraryStore
     @State private var editFeed: FeedEditorTarget?
     @State private var pendingRemoval: FeedSubscription?
     @State private var removalError: String?
+    @State private var website: SubscriptionWebsite?
 
     var body: some View {
         List {
-            Section {
-                NavigationLink {
-                    SourceMarketplaceView()
-                } label: {
-                    Label("书源广场", systemImage: "square.grid.2x2")
+            Section("书源广场") {
+                ForEach(BookSourceMarketplaceProvider.allCases) { provider in
+                    NavigationLink {
+                        SourceMarketplaceView(provider: provider)
+                    } label: {
+                        Label(provider.title, systemImage: "square.grid.2x2")
+                    }
                 }
+            }
+            Section("内置订阅") {
+                ForEach(SubscriptionWebsite.presets) { website in
+                    #if os(iOS)
+                    Button {
+                        self.website = website
+                    } label: {
+                        Label(website.title, systemImage: website.icon)
+                    }
+                    #else
+                    Link(destination: website.url) {
+                        Label(website.title, systemImage: website.icon)
+                    }
+                    #endif
+                }
+            }
+            Section {
                 NavigationLink {
                     SourceSubscriptionsView()
                 } label: {
@@ -54,6 +77,12 @@ struct SubscriptionsHomeView: View {
             }
         }
         .scrollContentBackground(.hidden)
+        #if os(iOS)
+        .sheet(item: $website) { website in
+            SubscriptionBrowser(url: website.url)
+                .ignoresSafeArea()
+        }
+        #endif
         .sheet(item: $editFeed) { target in
             NavigationStack { FeedEditorView(subscription: target.feed) }
         }
@@ -81,6 +110,32 @@ struct SubscriptionsHomeView: View {
         let feed: FeedSubscription?
     }
 }
+
+private struct SubscriptionWebsite: Identifiable {
+    let title: String
+    let icon: String
+    let url: URL
+
+    var id: URL { url }
+
+    static let presets = [
+        Self(title: "使用说明", icon: "book.closed", url: URL(string: "https://www.yuque.com/legado")!),
+        Self(title: "导入", icon: "square.and.arrow.down", url: URL(string: "https://lyc.ydz6.com/b/daoru")!),
+        Self(title: "Meow云", icon: "cloud", url: URL(string: "https://pan.miaogongzi.net/")!)
+    ]
+}
+
+#if os(iOS)
+struct SubscriptionBrowser: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> SFSafariViewController {
+        SFSafariViewController(url: url)
+    }
+
+    func updateUIViewController(_ controller: SFSafariViewController, context: Context) {}
+}
+#endif
 
 private struct FeedEditorView: View {
     @Environment(\.dismiss) private var dismiss

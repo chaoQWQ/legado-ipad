@@ -159,6 +159,8 @@ struct SourceAddressImportView: View {
 }
 
 struct SourceMarketplaceView: View {
+    let provider: BookSourceMarketplaceProvider
+
     @Environment(\.openURL) private var openURL
     @State private var category: BookSourceMarketplaceCategory = .sources
     @State private var libraryEntries: [BookSourceMarketplaceEntry] = []
@@ -172,6 +174,7 @@ struct SourceMarketplaceView: View {
     @State private var loadingMore = false
     @State private var loadMoreTask: Task<Void, Never>?
     @State private var pageFailure: String?
+    @State private var isShowingWebsite = false
 
     private var keyword: String? {
         let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -181,25 +184,27 @@ struct SourceMarketplaceView: View {
     var body: some View {
         let request = MarketplaceRequest(category: category, keyword: keyword, retry: retry)
         List {
-            Section {
-                Picker("分类", selection: $category) {
-                    ForEach(BookSourceMarketplaceCategory.allCases) { category in
-                        Text(category.title).tag(category)
+            if provider.categories.count > 1 {
+                Section {
+                    Picker("分类", selection: $category) {
+                        ForEach(provider.categories) { category in
+                            Text(category.title).tag(category)
+                        }
                     }
+                    .pickerStyle(.segmented)
                 }
-                .pickerStyle(.segmented)
             }
 
             if loading {
-                ProgressView("正在读取源仓库")
+                ProgressView("正在读取书源")
             } else if let failure {
                 ContentUnavailableView {
-                    Label("暂时无法读取源仓库", systemImage: "wifi.exclamationmark")
+                    Label("暂时无法读取书源", systemImage: "wifi.exclamationmark")
                 } description: {
                     Text(failure)
                 } actions: {
                     Button("重试") { retry += 1 }
-                    Button("打开地址发布页") { openURL(BookSourceMarketplaceClient.siteURL) }
+                    Button("打开仓库网页", action: openWebsite)
                 }
             } else if libraryEntries.isEmpty {
                 if let keyword { ContentUnavailableView.search(text: keyword) }
@@ -227,22 +232,28 @@ struct SourceMarketplaceView: View {
                         }
                     }
                 } header: {
-                    Text("源仓库 · \(category.title)")
+                    Text(category.title)
                 }
             }
         }
-        .navigationTitle("书源广场")
+        .navigationTitle(provider.title)
         .searchable(text: $query, prompt: "搜索当前分类")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Menu {
-                    Link("在浏览器打开当前分类", destination: category.webURL)
-                    Link("地址发布页", destination: BookSourceMarketplaceClient.siteURL)
+                    Button("打开仓库网页", systemImage: "safari", action: openWebsite)
+                    Link("在浏览器打开当前分类", destination: provider.webURL(for: category))
                 } label: {
-                    Label("源仓库网站", systemImage: "safari")
+                    Label("仓库网站", systemImage: "safari")
                 }
             }
         }
+        #if os(iOS)
+        .sheet(isPresented: $isShowingWebsite) {
+            SubscriptionBrowser(url: provider.siteURL)
+                .ignoresSafeArea()
+        }
+        #endif
         .task(id: request) {
             if completedRequest != request {
                 await load(request, debounce: request.keyword != nil)
@@ -250,6 +261,14 @@ struct SourceMarketplaceView: View {
         }
         .refreshable { await load(request) }
         .onDisappear { loadMoreTask?.cancel() }
+    }
+
+    private func openWebsite() {
+        #if os(iOS)
+        isShowingWebsite = true
+        #else
+        openURL(provider.siteURL)
+        #endif
     }
 
     @MainActor
@@ -267,11 +286,13 @@ struct SourceMarketplaceView: View {
         nextPage = nil
         do {
             if debounce { try await Task.sleep(for: .milliseconds(300)) }
-            let results = try await BookSourceMarketplaceClient().entries(in: request.category, keyword: request.keyword)
+            let page = try await BookSourceMarketplaceClient().page(
+                in: request.category, keyword: request.keyword, provider: provider
+            )
             try Task.checkCancellation()
             guard isCurrent(request), loadID == id else { return }
-            libraryEntries = results
-            nextPage = results.isEmpty ? nil : 2
+            libraryEntries = page.entries
+            nextPage = page.hasNextPage ? 2 : nil
         } catch {
             guard !Task.isCancelled, isCurrent(request), loadID == id else { return }
             failure = error.localizedDescription
@@ -293,15 +314,15 @@ struct SourceMarketplaceView: View {
             }
         }
         do {
-            let results = try await BookSourceMarketplaceClient().entries(
-                in: request.category, page: page, keyword: request.keyword
+            let results = try await BookSourceMarketplaceClient().page(
+                in: request.category, page: page, keyword: request.keyword, provider: provider
             )
             try Task.checkCancellation()
             guard isCurrent(request), loadID == id else { return }
             var seen = Set(libraryEntries.map(\.detailURL.path))
-            let additions = results.filter { seen.insert($0.detailURL.path).inserted }
+            let additions = results.entries.filter { seen.insert($0.detailURL.path).inserted }
             libraryEntries.append(contentsOf: additions)
-            nextPage = additions.isEmpty ? nil : page + 1
+            nextPage = results.hasNextPage && !additions.isEmpty ? page + 1 : nil
         } catch {
             guard !Task.isCancelled, isCurrent(request), loadID == id else { return }
             pageFailure = error.localizedDescription
@@ -453,13 +474,16 @@ private struct SourceSubscriptionPreview: View {
             return entry.detailURL
         }
 
-        func directURL() async throws -> URL {
+        @MainActor
+        func load(using library: LibraryStore) async throws -> (sources: [BookSource], url: URL) {
+            let url: URL
             switch self {
-            case .subscription(let subscription): subscription.url
-            case .address(let url): url
+            case .subscription(let subscription): url = subscription.url
+            case .address(let address): url = address
             case .marketplace(let entry):
-                try await BookSourceMarketplaceClient().downloadURL(for: entry)
+                return try await BookSourceMarketplaceClient().preview(for: entry)
             }
+            return (try await library.previewSourceSubscription(url), url)
         }
     }
 
@@ -631,8 +655,7 @@ private struct SourceSubscriptionPreview: View {
         result = nil
         selected = []
         do {
-            let url = try await request.directURL()
-            let sources = try await library.previewSourceSubscription(url)
+            let (sources, url) = try await request.load(using: library)
             try Task.checkCancellation()
             let existingIDs = Set(library.sources.map(\.id))
             selected = Set(sources.lazy.map(\.id).filter { !existingIDs.contains($0) })

@@ -71,3 +71,79 @@ import Testing
     let download = try await client.downloadURL(for: entry)
     #expect(download.absoluteString == "https://www.yck2026.fun/yuedu/shuyuans/json/id/12.json")
 }
+
+@Test func bookSourceMarketplaceYioveSearchPaginationAndPreviewUsePublicRoutes() async throws {
+    let id = "01234567-89ab-cdef-0123-456789abcdef"
+    let list = """
+    {"items":[{"id":"\(id)","name":"示例书源合集"},{"id":"\(id)","name":"重复条目"}],"total":25,"page":1,"size":20,"pages":2}
+    """
+    let source = #"[{"bookSourceUrl":"https://fiction.example","bookSourceName":"测试书源"}]"#
+    let client = BookSourceMarketplaceClient(fetch: { url, _ in
+        #expect(url.scheme == "https")
+        #expect(url.host == "shuyuan-api.yiove.com")
+        switch url.path {
+        case "/shuyuan/search":
+            let query = URLComponents(url: url, resolvingAgainstBaseURL: true)?.queryItems ?? []
+            #expect(query.contains(.init(name: "search_type", value: "book-source-collections")))
+            #expect(query.contains(.init(name: "search_key", value: "中文 & 搜索")))
+            #expect(query.contains(.init(name: "page", value: "1")))
+            #expect(query.contains(.init(name: "page_size", value: "20")))
+            return (Data(list.utf8), url)
+        case "/import/book-source-collection/\(id)":
+            return (Data(source.utf8), url)
+        default:
+            throw URLError(.unsupportedURL)
+        }
+    })
+    let page = try await client.page(in: .collections, keyword: " 中文 & 搜索 ", provider: .yiove)
+    #expect(page.hasNextPage)
+    #expect(page.entries.map(\.title) == ["示例书源合集"])
+    let entry = try #require(page.entries.first)
+    #expect(entry.provider == .yiove)
+    #expect(entry.detailURL.absoluteString == "https://shuyuan.yiove.com/book-source-collection/\(id)")
+    let preview = try await client.preview(for: entry)
+    #expect(preview.url.absoluteString == "https://shuyuan-api.yiove.com/import/book-source-collection/\(id)")
+    #expect(preview.sources.map(\.name) == ["测试书源"])
+    #expect(try BookSourceSubscription.address(from: entry.detailURL.absoluteString) == preview.url)
+}
+
+@Test func bookSourceMarketplaceRetriesPreviewOnMirrorAndReportsSanitizedFailures() async throws {
+    let client = BookSourceMarketplaceClient(fetch: { url, _ in
+        switch (url.host, url.path) {
+        case ("www.yckceo.com", "/yuedu/shuyuan/index.html"):
+            return (Data(#"<h2><a href="/yuedu/shuyuan/content/id/99.html">示例书源</a></h2>"#.utf8), url)
+        case ("www.yckceo.com", "/yuedu/shuyuan/json/id/99.json"):
+            throw URLError(.serverCertificateUntrusted)
+        case ("www.yck2026.fun", "/yuedu/shuyuan/json/id/99.json"):
+            return (Data(#"{"bookSourceUrl":"https://fiction.example","bookSourceName":"示例书源"}"#.utf8), url)
+        default:
+            throw URLError(.unsupportedURL)
+        }
+    })
+    let entries = try await client.entries(in: .sources)
+    let entry = try #require(entries.first)
+    #expect(entry.detailURL.host == "www.yckceo.com")
+    let preview = try await client.preview(for: entry)
+    #expect(preview.url.host == "www.yck2026.fun")
+    #expect(preview.sources.map(\.name) == ["示例书源"])
+
+    let failure = BookSourceMarketplaceClient(fetch: { url, _ in
+        if url.host == "www.yckceo.com" {
+            throw URLError(.serverCertificateUntrusted, userInfo: [NSURLErrorFailingURLStringErrorKey: url.absoluteString])
+        }
+        return (Data("<p>Unexpected response</p>".utf8), url)
+    })
+    do {
+        _ = try await failure.entries(in: .sources, keyword: "private search value")
+        Issue.record("An unrecognized HTML page must not be interpreted as an empty search")
+    } catch {
+        let description = error.localizedDescription
+        #expect(description.contains("www.yckceo.com"))
+        #expect(description.contains("设备不信任服务器证书"))
+        #expect(description.contains("NSURLErrorDomain -1202"))
+        #expect(description.contains("www.yck2026.fun"))
+        #expect(description.contains("响应未包含可识别的目录条目"))
+        #expect(description.contains("切换网络后重试"))
+        #expect(!description.contains("private"))
+    }
+}

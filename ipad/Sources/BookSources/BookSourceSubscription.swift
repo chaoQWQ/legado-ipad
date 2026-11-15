@@ -119,7 +119,10 @@ public struct BookSourceSubscriptionClient: Sendable {
 enum SourceDownload {
     typealias Fetch = @Sendable (URL, Int) async throws -> (Data, URL)
 
-    private static let session: URLSession = {
+    private static let session = makeSession()
+    private static let marketplaceSession = makeSession(allowedHosts: BookSourceMarketplaceClient.downloadHosts)
+
+    private static func makeSession(allowedHosts: Set<String>? = nil) -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpShouldSetCookies = false
         configuration.httpCookieStorage = nil
@@ -127,11 +130,15 @@ enum SourceDownload {
         configuration.urlCache = nil
         configuration.timeoutIntervalForRequest = 20
         configuration.timeoutIntervalForResource = 60
-        return URLSession(configuration: configuration, delegate: WebRedirects(), delegateQueue: nil)
-    }()
+        let redirects = WebRedirects(allowedHosts: allowedHosts)
+        return URLSession(configuration: configuration, delegate: redirects, delegateQueue: nil)
+    }
 
-    static func load(_ url: URL, _ maxBytes: Int) async throws -> (Data, URL) {
+    static func load(_ url: URL, _ maxBytes: Int, marketplace: Bool = false) async throws -> (Data, URL) {
         guard url.isWebURL, var components = URLComponents(url: url, resolvingAgainstBaseURL: true) else {
+            throw BookSourceSubscriptionError.invalidAddress
+        }
+        if marketplace, !BookSourceMarketplaceClient.isAllowed(url, hosts: BookSourceMarketplaceClient.downloadHosts) {
             throw BookSourceSubscriptionError.invalidAddress
         }
         let omitUserAgent = components.fragment == "requestWithoutUA"
@@ -140,7 +147,8 @@ enum SourceDownload {
 
         var request = URLRequest(url: address, cachePolicy: .reloadIgnoringLocalCacheData)
         if omitUserAgent { request.setValue("null", forHTTPHeaderField: "User-Agent") }
-        let (bytes, response) = try await session.bytes(for: request)
+        let client = marketplace ? marketplaceSession : session
+        let (bytes, response) = try await client.bytes(for: request)
         defer { bytes.task.cancel() }
         guard let http = response as? HTTPURLResponse, let finalURL = http.url, finalURL.isWebURL else {
             throw BookSourceError.invalidResponse
@@ -161,6 +169,12 @@ enum SourceDownload {
     }
 
     private final class WebRedirects: NSObject, URLSessionTaskDelegate {
+        private let allowedHosts: Set<String>?
+
+        init(allowedHosts: Set<String>?) {
+            self.allowedHosts = allowedHosts
+        }
+
         func urlSession(
             _ session: URLSession,
             task: URLSessionTask,
@@ -168,7 +182,15 @@ enum SourceDownload {
             newRequest request: URLRequest,
             completionHandler: @escaping @Sendable (URLRequest?) -> Void
         ) {
-            completionHandler(request.url?.isWebURL == true ? request : nil)
+            guard let url = request.url, url.isWebURL else {
+                completionHandler(nil)
+                return
+            }
+            if let allowedHosts, !BookSourceMarketplaceClient.isAllowed(url, hosts: allowedHosts) {
+                completionHandler(nil)
+            } else {
+                completionHandler(request)
+            }
         }
     }
 }
