@@ -8,21 +8,28 @@ import AppKit
 
 struct ReaderAskAIPanel: View {
     @Environment(\.dismiss) private var dismiss
+    @Binding private var windowSkillIDs: Set<String>
     @StateObject private var session: ReaderAskAISession
     @State private var showsHistory = false
-    @State private var showsSettings = false
+    @State private var activeSheet: PanelSheet?
     @State private var confirmsClear = false
     @State private var showsExcerpt = false
     @State private var expandsPanel = false
     @State private var followsLatest = true
     @FocusState private var composerFocused: Bool
 
-    init(bookID: UUID, bookTitle: String, author: String, sourceName: String?, chapterTitle: String, excerpt: String) {
+    init(
+        bookID: UUID, bookTitle: String, author: String, sourceName: String?, chapterTitle: String, excerpt: String,
+        selectedSkillIDs: Binding<Set<String>>
+    ) {
         let context = ReaderAskAIContext(
             bookTitle: bookTitle, author: author, sourceName: sourceName,
             chapterTitle: chapterTitle, excerpt: excerpt
         )
-        _session = StateObject(wrappedValue: ReaderAskAISession(bookID: bookID, context: context))
+        _windowSkillIDs = selectedSkillIDs
+        _session = StateObject(wrappedValue: ReaderAskAISession(
+            bookID: bookID, context: context, initialSkillIDs: selectedSkillIDs.wrappedValue
+        ))
     }
 
     var body: some View {
@@ -62,9 +69,20 @@ struct ReaderAskAIPanel: View {
             }
         }
         .task { session.load() }
+        .onChange(of: session.selectedSkillIDs) { _, ids in windowSkillIDs = ids }
         .onDisappear { session.stop() }
-        .sheet(isPresented: $showsSettings, onDismiss: { session.reloadSettings() }) {
-            NavigationStack { ReaderAISettingsView() }
+        .sheet(item: $activeSheet) { sheet in
+            switch sheet {
+            case .settings:
+                NavigationStack { ReaderAISettingsView() }
+                    .onDisappear { session.reloadSettings() }
+            case .skills:
+                ReaderAskAISkillPicker(
+                    skills: session.availableSkills,
+                    selection: session.selectedSkillIDs,
+                    apply: session.chooseSkills
+                )
+            }
         }
         .alert("清空本书的所有问 AI 对话？", isPresented: $confirmsClear) {
             Button("清空本书历史", role: .destructive) { session.clearHistory() }
@@ -105,6 +123,12 @@ struct ReaderAskAIPanel: View {
                     composerFocused = false
                     showsHistory.toggle()
                 }
+                Button("当前窗口 Skill（\(session.selectedSkillIDs.count)）", systemImage: "list.bullet.rectangle") {
+                    composerFocused = false
+                    session.reloadSettings()
+                    activeSheet = .skills
+                }
+                .disabled(session.isRequesting)
                 #if os(iOS)
                 if #available(iOS 18.0, *) {
                     Button(
@@ -113,7 +137,7 @@ struct ReaderAskAIPanel: View {
                     ) { expandsPanel.toggle() }
                 }
                 #endif
-                Button("AI 设置", systemImage: "gearshape") { showsSettings = true }
+                Button("AI 设置", systemImage: "gearshape") { activeSheet = .settings }
                     .disabled(session.isRequesting)
             } label: {
                 Label("对话选项", systemImage: "ellipsis.circle")
@@ -326,7 +350,7 @@ struct ReaderAskAIPanel: View {
                 Label(session.settingsError ?? "请配置可用的问 AI 模型。", systemImage: "info.circle")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                Button("配置 AI 服务", systemImage: "gearshape") { showsSettings = true }
+                Button("配置 AI 服务", systemImage: "gearshape") { activeSheet = .settings }
                     .buttonStyle(.bordered)
             }
         }
@@ -380,4 +404,81 @@ struct ReaderAskAIPanel: View {
     }
 
     private enum ScrollTarget { case latest }
+
+    private enum PanelSheet: Identifiable {
+        case settings, skills
+
+        var id: Self { self }
+    }
+}
+
+private struct ReaderAskAISkillPicker: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var selection: Set<String>
+    let skills: [ReaderAISkill]
+    let apply: (Set<String>) -> Void
+
+    init(skills: [ReaderAISkill], selection: Set<String>, apply: @escaping (Set<String>) -> Void) {
+        self.skills = skills
+        self.apply = apply
+        _selection = State(initialValue: selection)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if skills.isEmpty {
+                    ContentUnavailableView(
+                        "没有可用 Skill", systemImage: "list.bullet.rectangle",
+                        description: Text("请在 AI 设置中导入或启用 Skill。")
+                    )
+                } else {
+                    List {
+                        Section {
+                            ForEach(skills) { skill in
+                                Toggle(isOn: Binding {
+                                    selection.contains(skill.id)
+                                } set: { isSelected in
+                                    if isSelected { selection.insert(skill.id) }
+                                    else { selection.remove(skill.id) }
+                                }) {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(skill.name.isEmpty ? "Skill" : skill.name)
+                                        if !skill.description.isEmpty {
+                                            Text(skill.description)
+                                                .font(.footnote)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                }
+                            }
+                        } footer: {
+                            Text("所选 Skill 只用于当前问 AI 窗口。")
+                        }
+                        Button("清空选择", role: .destructive) {
+                            apply([])
+                            dismiss()
+                        }
+                        .disabled(selection.isEmpty)
+                    }
+                    .listStyle(.insetGrouped)
+                }
+            }
+            .navigationTitle("当前窗口 Skill")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") {
+                        apply(selection)
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
 }

@@ -179,6 +179,7 @@ private struct ReaderAIProviderEditor: View {
                         Text(mode.title).tag(mode)
                     }
                 }
+                ReaderAIEndpointPreview(address: draft.address, route: draft.apiMode.route)
                 Toggle("提示词缓存", isOn: $draft.promptCache)
             }
             ReaderAISettingsHeadersField(headers: $draft.headers)
@@ -247,6 +248,43 @@ private struct ReaderAIProviderEditor: View {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+}
+
+struct ReaderAIEndpointPreview: View {
+    let address: String
+    let route: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("请求地址预览")
+            if let preview {
+                Text(verbatim: "POST \(preview.address)")
+                    .font(.system(.footnote, design: .monospaced))
+                    .textSelection(.enabled)
+                if preview.hidesQuery {
+                    Text("查询参数已隐藏")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Text("请填写有效的接口地址。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var preview: (address: String, hidesQuery: Bool)? {
+        guard let url = try? ReaderAIEndpoint.make(address, route: route),
+              var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        let hidesQuery = components.percentEncodedQuery != nil
+        components.percentEncodedQuery = nil
+        components.fragment = nil
+        components.user = nil
+        components.password = nil
+        guard let address = components.string else { return nil }
+        return (address, hidesQuery)
     }
 }
 

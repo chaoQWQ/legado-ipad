@@ -143,6 +143,12 @@ private struct ReaderAIImageProviderEditor: View {
                         Text("Images API").tag(ImageAPI.images)
                         Text("Responses").tag(ImageAPI.responses)
                     }
+                    if let parameters = try? draft.parameters() {
+                        ReaderAIEndpointPreview(
+                            address: draft.address,
+                            route: draft.usesResponses(parameters: parameters) ? "responses" : "images/generations"
+                        )
+                    }
                     TextField("模型 ID", text: $draft.model)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()

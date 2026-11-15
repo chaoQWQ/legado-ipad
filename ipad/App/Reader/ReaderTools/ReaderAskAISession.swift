@@ -7,6 +7,8 @@ final class ReaderAskAISession: ObservableObject {
     @Published private(set) var conversationID: UUID?
     @Published private(set) var choice: ReaderAIModelChoice?
     @Published private(set) var choices: [ReaderAIModelChoice] = []
+    @Published private(set) var availableSkills: [ReaderAISkill] = []
+    @Published private(set) var selectedSkillIDs: Set<String> = []
     @Published private(set) var historyError: String?
     @Published private(set) var settingsError: String?
     @Published private(set) var partialAnswer = ""
@@ -20,10 +22,11 @@ final class ReaderAskAISession: ObservableObject {
     private var requestID: UUID?
     private var loaded = false
 
-    init(bookID: UUID, context: ReaderAskAIContext) {
+    init(bookID: UUID, context: ReaderAskAIContext, initialSkillIDs: Set<String> = []) {
         self.bookID = bookID
         self.context = context
         self.draft = context.excerpt.isEmpty ? "" : ReaderAskAIContext.defaultQuestion
+        self.selectedSkillIDs = initialSkillIDs
     }
 
     var conversation: ReaderAskAIConversation? { history.conversation(conversationID) }
@@ -54,12 +57,16 @@ final class ReaderAskAISession: ObservableObject {
             choices = settings.enabled ? settings.questionChoices : []
             choice = choices.first { $0.id == selectedID }
                 ?? (settings.enabled ? settings.defaultQuestionChoice : nil)
+            availableSkills = settings.skills.filter(\.enabled)
+            selectedSkillIDs.formIntersection(availableSkills.map(\.id))
             let prompt = settings.askPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
             askPrompt = prompt.isEmpty ? ReaderAISettings.defaultAskPrompt : prompt
             settingsError = settings.enabled ? nil : "请在 AI 设置中启用 AI。"
         } catch {
             choice = nil
             choices = []
+            availableSkills = []
+            selectedSkillIDs = []
             settingsError = error.localizedDescription
         }
     }
@@ -67,6 +74,11 @@ final class ReaderAskAISession: ObservableObject {
     func choose(_ model: ReaderAIModelChoice) {
         guard !isRequesting else { return }
         choice = model
+    }
+
+    func chooseSkills(_ ids: Set<String>) {
+        guard !isRequesting else { return }
+        selectedSkillIDs = ids.intersection(availableSkills.map(\.id))
     }
 
     func send() {
@@ -144,12 +156,13 @@ final class ReaderAskAISession: ObservableObject {
     private func request(turnID: UUID, using choice: ReaderAIModelChoice) {
         guard let conversation, conversation.turns.last?.id == turnID else { return }
         let messages = conversation.requestMessages(prompt: askPrompt)
+        let activeSkills = availableSkills.filter { selectedSkillIDs.contains($0.id) }
         let requestID = UUID()
         self.requestID = requestID
         pendingTurnID = turnID
         operation = Task { [weak self] in
             do {
-                let answer = try await ReaderAIClient.chat(messages: messages, using: choice) { delta in
+                let answer = try await ReaderAIClient.chat(messages: messages, using: choice, skills: activeSkills) { delta in
                     guard let self, self.requestID == requestID else { return }
                     self.partialAnswer += delta
                 }

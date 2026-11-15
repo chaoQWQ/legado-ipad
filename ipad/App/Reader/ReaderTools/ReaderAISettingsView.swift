@@ -3,6 +3,8 @@ import SwiftUI
 struct ReaderAISettingsView: View {
     @StateObject private var presentation = ReaderAISettingsPresentation()
     @State private var showsPrompt = false
+    @State private var installsDefaultSkill = false
+    @State private var installedSkillName: String?
 
     var body: some View {
         Group {
@@ -31,6 +33,27 @@ struct ReaderAISettingsView: View {
         return Form {
             Section {
                 Toggle("启用 AI", isOn: presentation.binding(\.enabled))
+                Button(action: installDefaultSkill) {
+                    if installsDefaultSkill {
+                        HStack {
+                            Text("正在安装 Skill…")
+                            Spacer()
+                            ProgressView()
+                        }
+                    } else {
+                        LabeledContent("安装默认 阅读Archive Skill", value: "SKILL.md")
+                    }
+                }
+                .disabled(installsDefaultSkill)
+                NavigationLink {
+                    ReaderAISkillSettingsView(presentation: presentation)
+                } label: {
+                    LabeledContent("管理 Skill", value: skillSummary)
+                }
+            } footer: {
+                if let installedSkillName {
+                    Text("已安装「\(installedSkillName)」。")
+                }
             }
             Section("默认模型") {
                 Picker("默认聊天模型", selection: presentation.binding(\.defaultModelID)) {
@@ -78,6 +101,28 @@ struct ReaderAISettingsView: View {
             }
         }
     }
+
+    private var skillSummary: String {
+        let skills = presentation.settings.skills
+        guard !skills.isEmpty else { return "未安装 Skill" }
+        return "已启用 \(skills.filter(\.enabled).count) 个，共 \(skills.count) 个"
+    }
+
+    private func installDefaultSkill() {
+        guard !installsDefaultSkill else { return }
+        installsDefaultSkill = true
+        installedSkillName = nil
+        Task {
+            defer { installsDefaultSkill = false }
+            do {
+                let skill = try await ReaderAISkill.fetchDefault()
+                try presentation.updateSkills { $0.installDefaultSkill(skill) }
+                installedSkillName = skill.name
+            } catch {
+                presentation.errorMessage = error.localizedDescription
+            }
+        }
+    }
 }
 
 @MainActor
@@ -103,6 +148,14 @@ final class ReaderAISettingsPresentation: ObservableObject {
         var updated = try ReaderAISettings.load()
         change(&updated)
         try updated.save()
+        settings = updated
+    }
+
+    func updateSkills(_ change: (inout ReaderAISettings) -> Void) throws {
+        var updated = try ReaderAISettings.load()
+        updated.skills = try ReaderAISkill.loadLibrary()
+        change(&updated)
+        try updated.saveSkills()
         settings = updated
     }
 

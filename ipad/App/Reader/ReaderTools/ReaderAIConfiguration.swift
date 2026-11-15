@@ -98,6 +98,11 @@ struct ReaderAISettings: Codable, Sendable {
     var askModelID: String?
     var imageProviderID: String?
     var askPrompt = Self.defaultAskPrompt
+    var skills: [ReaderAISkill] = []
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled, providers, models, imageProviders, defaultModelID, askModelID, imageProviderID, askPrompt
+    }
 
     var questionChoices: [ReaderAIModelChoice] {
         let byID = Dictionary(providers.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
@@ -133,9 +138,28 @@ struct ReaderAISettings: Codable, Sendable {
         query[kSecReturnData as String] = true
         var value: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &value)
-        if status == errSecItemNotFound { return .init() }
-        guard status == errSecSuccess, let data = value as? Data else { throw ReaderAIError.keychain }
-        return try decode(data)
+        var settings = Self()
+        if status != errSecItemNotFound {
+            guard status == errSecSuccess, let data = value as? Data else { throw ReaderAIError.keychain }
+            settings = try decode(data)
+        }
+        settings.skills = (try? ReaderAISkill.loadLibrary()) ?? []
+        return settings
+    }
+
+    func saveSkills() throws { try ReaderAISkill.saveLibrary(skills) }
+
+    mutating func installDefaultSkill(_ imported: ReaderAISkill) {
+        var skill = imported
+        let matching = skills.filter {
+            $0.name == imported.name || (!imported.sourceURL.isEmpty && $0.sourceURL == imported.sourceURL)
+        }
+        if let existing = matching.first {
+            skill.id = existing.id
+        }
+        let replaced = Set(matching.map(\.id))
+        skills.removeAll { replaced.contains($0.id) }
+        skills.append(skill)
     }
 
     static func decode(_ data: Data) throws -> Self {
@@ -245,7 +269,9 @@ enum ReaderAIEndpoint {
             path.hasSuffix($0)
         }) {
             path.removeLast(knownRoute.count)
-        } else if !path.hasSuffix("/v1") {
+        } else if !path.split(separator: "/").contains(where: { part in
+            part.range(of: #"^v[0-9]+(?:(?:alpha|beta)[0-9]*)?$"#, options: .regularExpression) != nil
+        }) {
             path += "/v1"
         }
         parts.percentEncodedPath = "\(path)/\(route)"

@@ -23,22 +23,69 @@ enum ReaderAIClient {
 
     static func chat(
         messages: [ReaderAIChatMessage], using choice: ReaderAIModelChoice,
+        skills: [ReaderAISkill] = [],
         onDelta: @MainActor (String) -> Void = { _ in }
     ) async throws -> String {
         guard !choice.model.isEmpty else { throw ReaderAIError.missingSettings }
         let provider = choice.provider
-        let fields = messages.filter { !$0.content.aiTrimmed.isEmpty }.map {
+        let mode = provider.apiMode
+        let skillTool = ReaderAISkillTool(skills)
+        var fields: [[String: Any]] = messages.filter { !$0.content.aiTrimmed.isEmpty }.map {
             ["role": $0.role.rawValue, "content": $0.content]
         }
-        let inputKey = provider.apiMode == .responses ? "input" : "messages"
-        var body: [String: Any] = ["model": choice.model, "stream": true, inputKey: fields]
+        let inputKey = mode == .responses ? "input" : "messages"
+        var body: [String: Any] = ["model": choice.model, "stream": true]
         if provider.promptCache {
             body["prompt_cache_key"] = String("legado-reader-\(choice.id)".prefix(64))
         }
-        let request = try request(
-            address: provider.address, route: provider.apiMode.route, key: provider.key, headers: provider.headers,
-            timeout: 300, body: body, accept: "text/event-stream, application/json"
-        )
+        if !skillTool.skills.isEmpty {
+            let priorSystem = fields.prefix { $0["role"] as? String == "system" }.count
+            fields.insert(["role": "system", "content": skillTool.catalog], at: priorSystem)
+            body["tools"] = [skillTool.definition(for: mode)]
+            body["tool_choice"] = "auto"
+        }
+        var answer = ""
+        let maxToolRounds = 4
+        for round in 0...maxToolRounds {
+            try Task.checkCancellation()
+            body[inputKey] = fields
+            let request = try request(
+                address: provider.address, route: mode.route, key: provider.key, headers: provider.headers,
+                timeout: 300, body: body, accept: "text/event-stream, application/json"
+            )
+            let response = try await chatTurn(request, onDelta: onDelta)
+            answer.append(response.text)
+            let calls = response.toolCalls
+            guard !calls.isEmpty else {
+                guard !response.text.aiTrimmed.isEmpty else { throw ReaderAIError.emptyResponse }
+                return answer.aiTrimmed
+            }
+            guard !skillTool.skills.isEmpty, calls.count <= 12, round < maxToolRounds else {
+                throw ReaderAIError.provider("AI 未能完成本轮 Skill 调用。")
+            }
+            if mode == .chatCompletions {
+                let content: Any = response.text.isEmpty ? NSNull() as Any : response.text
+                var assistant: [String: Any] = ["role": "assistant", "content": content, "tool_calls": calls.map(\.chatItem)]
+                if !response.reasoning.isEmpty { assistant["reasoning_content"] = response.reasoning }
+                fields.append(assistant)
+            } else if let output = response.replayableResponsesOutput {
+                fields.append(contentsOf: output)
+            } else {
+                if !response.text.isEmpty { fields.append(["role": "assistant", "content": response.text]) }
+                fields.append(contentsOf: calls.map(\.responsesItem))
+            }
+            fields.append(contentsOf: try calls.map { call in
+                try call.output(skillTool.result(for: call), for: mode)
+            })
+            if !response.text.isEmpty {
+                answer.append("\n\n")
+                await onDelta("\n\n")
+            }
+        }
+        throw ReaderAIError.emptyResponse
+    }
+
+    private static func chatTurn(_ request: URLRequest, onDelta: @MainActor (String) -> Void) async throws -> ChatStream {
         let (bytes, response) = try await open(request)
         defer { bytes.task.cancel() }
         guard response.expectedContentLength <= textLimit else { throw ReaderAIError.oversizedResponse }
@@ -57,7 +104,7 @@ enum ReaderAIClient {
             }
             if let delta = try result.line("", redacting: request) { await onDelta(delta) }
         }
-        return try result.answer()
+        return result
     }
 
     static func generateImage(prompt: String, provider: ReaderAIImageProvider) async throws -> Data {
@@ -188,7 +235,7 @@ enum ReaderAIClient {
 
     private static func readStream(
         _ bytes: URLSession.AsyncBytes, request: URLRequest, onDelta: @MainActor (String) -> Void
-    ) async throws -> String {
+    ) async throws -> ChatStream {
         var stream = ChatStream()
         var line = [UInt8]()
         var count = 0
@@ -199,7 +246,7 @@ enum ReaderAIClient {
                 if let delta = try stream.line(String(decoding: line, as: UTF8.self), redacting: request) {
                     await onDelta(delta)
                 }
-                if stream.finished { return try stream.answer() }
+                if stream.finished { return stream }
                 line.removeAll(keepingCapacity: true)
             } else {
                 line.append(byte)
@@ -207,13 +254,32 @@ enum ReaderAIClient {
         }
         if let delta = try stream.line(String(decoding: line, as: UTF8.self), redacting: request) { await onDelta(delta) }
         if let delta = try stream.line("", redacting: request) { await onDelta(delta) }
-        return try stream.answer()
+        return stream
     }
 
     private struct ChatStream {
-        private var text = ""
+        private(set) var text = ""
+        private(set) var reasoning = ""
         private var pending = ""
+        private var calls: [Int: ReaderAISkillTool.Call] = [:]
+        private var indexedOutput: [Int: String] = [:]
+        private var completedItems: [Int: [String: Any]] = [:]
         private(set) var finished = false
+
+        var toolCalls: [ReaderAISkillTool.Call] {
+            calls.keys.sorted().compactMap { index in
+                guard var call = calls[index], !call.name.isEmpty else { return nil }
+                if call.id.isEmpty { call.id = "call_\(index)" }
+                return call
+            }
+        }
+
+        var replayableResponsesOutput: [[String: Any]]? {
+            let items = completedItems.keys.sorted().compactMap { completedItems[$0] }
+            let ids = Set(items.compactMap { $0["call_id"] as? String })
+            guard !ids.isEmpty, toolCalls.allSatisfy({ ids.contains($0.id) }) else { return nil }
+            return items
+        }
 
         mutating func line(_ raw: String, redacting request: URLRequest) throws -> String? {
             let line = raw.aiTrimmed
@@ -258,49 +324,110 @@ enum ReaderAIClient {
             }
 
             let fragment: String?
+            let outputIndex = event["output_index"] as? Int ?? 0
             switch event["type"] as? String {
             case "response.output_text.delta":
                 fragment = event["delta"] as? String
+                if let fragment { indexedOutput[outputIndex, default: ""].append(fragment) }
+            case "response.output_text.done":
+                fragment = completeOutputText(event["text"] as? String, at: outputIndex)
+            case "response.output_item.added", "response.output_item.done":
+                let item = event["item"] as? [String: Any] ?? [:]
+                if event["type"] as? String == "response.output_item.done", !item.isEmpty {
+                    completedItems[outputIndex] = item
+                }
+                captureResponseCall(item, at: outputIndex)
+                fragment = completeOutputText(responseItemText(item), at: outputIndex)
+            case "response.function_call_arguments.delta", "response.function_call_arguments.done":
+                var call = calls[outputIndex, default: .init()]
+                if let name = event["name"] as? String { call.name = name }
+                if let arguments = event["arguments"] as? String { call.arguments = arguments }
+                if let delta = event["delta"] as? String { call.arguments.append(delta) }
+                calls[outputIndex] = call
+                return nil
             case "response.completed", "response.incomplete":
                 finished = true
                 let result = event["response"] as? [String: Any] ?? event
-                fragment = suffix(of: responseText(result))
+                captureResponseCalls(result)
+                fragment = suffix(of: responseText(result), after: text)
             case "response.failed", "error":
                 let message = serviceError(in: event, request: request, allowTopLevelMessage: true)
                 throw message.map(ReaderAIError.provider) ?? ReaderAIError.emptyResponse
             default:
                 let choice = (event["choices"] as? [[String: Any]])?.first
-                let delta = (choice?["delta"] as? [String: Any])?["content"]
-                let message = (choice?["message"] as? [String: Any])?["content"]
-                fragment = contentText(delta) ?? suffix(of: contentText(message)) ?? suffix(of: responseText(event))
+                let delta = choice?["delta"] as? [String: Any]
+                let message = choice?["message"] as? [String: Any]
+                if let fullReasoning = message?["reasoning_content"] as? String, !fullReasoning.isEmpty {
+                    reasoning = fullReasoning
+                } else if let part = delta?["reasoning_content"] as? String {
+                    reasoning.append(part)
+                }
+                captureChatCalls(delta, incremental: true)
+                captureChatCalls(message, incremental: false)
+                captureResponseCalls(event)
+                let full = contentText(message?["content"]) ?? responseText(event) ?? event["response"] as? String
+                fragment = contentText(delta?["content"]) ?? choice?["text"] as? String ?? suffix(of: full, after: text)
             }
             guard let fragment, !fragment.isEmpty else { return nil }
             text.append(fragment)
             return fragment
         }
 
-        private func suffix(of response: String?) -> String? {
+        private mutating func completeOutputText(_ value: String?, at index: Int) -> String? {
+            guard let value, let tail = suffix(of: value, after: indexedOutput[index, default: ""]) else { return nil }
+            indexedOutput[index] = value
+            return tail
+        }
+
+        private func suffix(of response: String?, after text: String) -> String? {
             guard let response else { return nil }
             if text.isEmpty { return response }
             guard response.hasPrefix(text) else { return nil }
             return String(response.dropFirst(text.count))
         }
 
-        func answer() throws -> String {
-            let answer = text.aiTrimmed
-            guard !answer.isEmpty else { throw ReaderAIError.emptyResponse }
-            return answer
+        private mutating func captureChatCalls(_ message: [String: Any]?, incremental: Bool) {
+            let values = message?["tool_calls"] as? [[String: Any]] ?? []
+            for (position, value) in values.enumerated() {
+                guard let function = value["function"] as? [String: Any] else { continue }
+                let index = value["index"] as? Int ?? position
+                var call = calls[index, default: .init()]
+                if let id = value["id"] as? String, !id.isEmpty { call.id = id }
+                if let name = function["name"] as? String, !name.isEmpty { call.name = name }
+                if let arguments = function["arguments"] as? String {
+                    if incremental { call.arguments.append(arguments) } else { call.arguments = arguments }
+                }
+                calls[index] = call
+            }
+        }
+
+        private mutating func captureResponseCall(_ item: [String: Any], at index: Int) {
+            guard item["type"] as? String == "function_call" else { return }
+            var call = calls[index, default: .init()]
+            if let id = item["call_id"] as? String, !id.isEmpty { call.id = id }
+            if let name = item["name"] as? String, !name.isEmpty { call.name = name }
+            if let arguments = item["arguments"] as? String, !arguments.isEmpty { call.arguments = arguments }
+            calls[index] = call
+        }
+
+        private mutating func captureResponseCalls(_ event: [String: Any]) {
+            for (index, item) in (event["output"] as? [[String: Any]] ?? []).enumerated() {
+                completedItems[index] = item
+                captureResponseCall(item, at: index)
+            }
         }
     }
 
     private static func responseText(_ object: [String: Any]) -> String? {
         if let text = object["output_text"] as? String { return text }
         let output = object["output"] as? [[String: Any]] ?? []
-        let messages = output.compactMap { item -> String? in
-            guard item["type"] as? String == "message" else { return nil }
-            return contentText(item["content"])
-        }
+        let messages = output.compactMap(responseItemText)
         return messages.isEmpty ? nil : messages.joined(separator: "\n")
+    }
+
+    private static func responseItemText(_ item: [String: Any]) -> String? {
+        guard item["type"] as? String == "message" else { return nil }
+        return contentText(item["content"])
     }
 
     private static func contentText(_ content: Any?) -> String? {

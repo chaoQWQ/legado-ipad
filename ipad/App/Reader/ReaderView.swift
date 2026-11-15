@@ -49,6 +49,7 @@ struct ReaderView: View {
     @State private var refreshError: String?
     @State private var activeSheet: Sheet?
     @State private var selectedTextForTool = ""
+    @State private var readerAISkillIDs: Set<String> = []
     @State private var selectedImageContext: ReaderImageContext?
     @State private var saveTask: Task<Void, Never>?
     @State private var savedPosition: ReaderPosition?
@@ -317,7 +318,8 @@ struct ReaderView: View {
         case .askAI:
             ReaderAskAIPanel(
                 bookID: bookID, bookTitle: titleScript.convert(title), author: author,
-                sourceName: online?.sourceName, chapterTitle: chapterTitle, excerpt: selectedTextForTool
+                sourceName: online?.sourceName, chapterTitle: chapterTitle, excerpt: selectedTextForTool,
+                selectedSkillIDs: $readerAISkillIDs
             )
         case .generateImage:
             if let selectedImageContext { ReaderImageGenerationView(context: selectedImageContext) }
