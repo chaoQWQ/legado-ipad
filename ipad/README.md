@@ -23,4 +23,4 @@ xcodebuild -project LegadoPad.xcodeproj -scheme LegadoPad \
 
 书源使用自身指定的 HTTP 或 HTTPS 地址。兼容范围包括常见 CSS、XPath、基础 JSONPath 和 Legado 选择器，可处理常规 GET／POST 和目录或正文分页。JavaScript、WebView、登录流程和部分复杂规则暂未移植。应用不内置书籍或书源。
 
-本分支使用仓库的 [GPL-3.0 许可](../LICENSE)。图标源于 Android 版的原有资源。
+本分支使用仓库的 [GPL-3.0 许可](../LICENSE)。iPad 应用使用仓库的 [阅读 Archive 图标](../docs/archive_icon.svg)。
