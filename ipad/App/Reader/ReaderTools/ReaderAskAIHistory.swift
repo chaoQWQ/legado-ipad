@@ -59,6 +59,7 @@ struct ReaderAskAITurn: Codable, Identifiable {
     var status: Status = .waiting
     var error: String?
     var toolTrace: ReaderAskAIToolTrace?
+    var reasoning: [String]?
 }
 
 struct ReaderAskAIConversation: Codable, Identifiable {
@@ -85,6 +86,25 @@ struct ReaderAskAIConversation: Codable, Identifiable {
         }
         messages.append(.init(role: .user, content: current.context.requestText(for: current.question)))
         return messages
+    }
+
+    func readingRequestMessages() -> [ReaderAIChatMessage] {
+        guard let current = turns.last else { return [] }
+        let history = turns.dropLast().flatMap { turn -> [ReaderAIChatMessage] in
+            var messages = [ReaderAIChatMessage(role: .user, content: turn.question)]
+            let reply: String
+            switch turn.status {
+            case .answered: reply = turn.answer
+            case .stopped: reply = turn.answer.isEmpty ? "已取消" : turn.answer
+            case .failed: reply = "上一轮 AI 请求失败。"
+            case .waiting: reply = "上一轮请求中断。"
+            }
+            messages.append(ReaderAIChatMessage(role: .assistant, content: reply))
+            return messages
+        }
+        return Array(history.filter { !$0.content.aiTrimmed.isEmpty }.suffix(12)) + [
+            ReaderAIChatMessage(role: .user, content: current.context.requestText(for: current.question))
+        ]
     }
 }
 

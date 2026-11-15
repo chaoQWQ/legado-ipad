@@ -24,9 +24,15 @@ final class ReaderAskAISession: ObservableObject {
             events.append(Event(callID: id, step: step))
         }
 
-        mutating func complete(id: String, succeeded: Bool) {
+        mutating func retry(id: String, attempt: Int) {
+            guard let index = events.lastIndex(where: { $0.callID == id && $0.step.status == .running }) else { return }
+            events[index].step.attempts = attempt
+        }
+
+        mutating func complete(id: String, succeeded: Bool, resultPreview: String?) {
             guard let index = events.lastIndex(where: { $0.callID == id && $0.step.status == .running }) else { return }
             events[index].step.status = succeeded ? .succeeded : .failed
+            events[index].step.resultPreview = resultPreview
         }
 
         mutating func interruptPending() {
@@ -50,6 +56,8 @@ final class ReaderAskAISession: ObservableObject {
     @Published private(set) var historyError: String?
     @Published private(set) var settingsError: String?
     @Published private(set) var partialAnswer = ""
+    @Published private(set) var partialReasoning = ""
+    @Published private(set) var completedReasoning: [String] = []
     @Published private(set) var pendingTurnID: UUID?
     @Published var draft: String
 
@@ -57,11 +65,7 @@ final class ReaderAskAISession: ObservableObject {
     @Published private(set) var context: ReaderAskAIContext
     let isGeneral: Bool
     private weak var library: LibraryStore?
-    private var askPrompt = ""
-    private var toolRoundLimit = 32
-    private var readToolScope = ReaderAIToolScope.enabled
-    private var disabledNativeTools: Set<String> = []
-    private var tavily = ReaderAITavilyConfig()
+    private var requestSettings = ReaderAISettings()
     private var operation: Task<Void, Never>?
     private var requestID: UUID?
     private var loaded = false
@@ -93,6 +97,14 @@ final class ReaderAskAISession: ObservableObject {
         do {
             history = try ReaderAskAIHistory.load(for: bookID)
             conversationID = history.conversation(history.currentID)?.id
+            if !isGeneral && conversationID == nil {
+                if let latest = history.conversations.first {
+                    changeHistory { $0.currentID = latest.id }
+                    conversationID = latest.id
+                } else {
+                    newConversation(keepsDraft: true)
+                }
+            }
         } catch {
             historyError = "无法打开本书的问 AI 历史。此面板的对话将临时保留。"
         }
@@ -102,9 +114,9 @@ final class ReaderAskAISession: ObservableObject {
 
     func reopen(at context: ReaderAskAIContext) {
         self.context = context
+        if !context.initialQuestion.isEmpty && isRequesting { stop() }
         if loaded && !isRequesting { reloadSettings() }
         guard !context.initialQuestion.isEmpty else { return }
-        if isRequesting { stop() }
         draft = context.initialQuestion
         if loaded { send() }
     }
@@ -112,7 +124,8 @@ final class ReaderAskAISession: ObservableObject {
     func reloadSettings() {
         do {
             let settings = try ReaderAISettings.load()
-            let selectedID = choice?.id
+            requestSettings = settings
+            let selectedID = isGeneral ? choice?.id : settings.askModelID
             choices = settings.enabled ? settings.questionChoices : []
             choice = choices.first { $0.id == selectedID }
                 ?? (settings.enabled ? (isGeneral ? settings.defaultChatChoice : settings.defaultQuestionChoice) : nil)
@@ -120,20 +133,10 @@ final class ReaderAskAISession: ObservableObject {
             selectedSkillIDs.formIntersection(availableSkills.map(\.id))
             availableMCPServers = settings.mcpServers.filter(\.enabled)
             selectedMCPIDs.formIntersection(availableMCPServers.map(\.id))
-            toolRoundLimit = settings.toolRoundLimit
-            readToolScope = settings.readToolScope
-            disabledNativeTools = settings.disabledNativeToolNames ?? []
-            tavily = settings.tavily
             returnToSend = settings.returnToSend
             showsThinkingToolbar = settings.showsThinkingToolbar
-            let prompt = settings.askPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-            if isGeneral {
-                askPrompt = "你是阅读 Archive 的 AI 助手。使用当前窗口可用的工具帮助用户。保留书源草稿在 AI 工作区。"
-            } else {
-                askPrompt = Self.readingSystemPrompt
-                if !prompt.isEmpty && prompt != ReaderAISettings.defaultAskPrompt { askPrompt += "\n\n" + prompt }
-            }
-            settingsError = settings.enabled ? nil : "请在 AI 设置中启用 AI。"
+            settingsError = !settings.enabled ? "请在 AI 设置中启用 AI。"
+                : (choice == nil ? "请在 AI 设置中配置问 AI 模型。" : nil)
         } catch {
             choice = nil
             choices = []
@@ -205,6 +208,7 @@ final class ReaderAskAISession: ObservableObject {
             conversation.turns[index].answer = ""
             conversation.turns[index].error = nil
             conversation.turns[index].toolTrace = nil
+            conversation.turns[index].reasoning = nil
             conversation.updatedAt = .now
             history.update(conversation)
         }
@@ -218,11 +222,19 @@ final class ReaderAskAISession: ObservableObject {
     }
 
     func newConversation() {
+        newConversation(keepsDraft: false)
+    }
+
+    private func newConversation(keepsDraft: Bool) {
         stop()
         toolActivity = .init()
-        changeHistory { $0.currentID = nil }
-        conversationID = nil
-        draft = ""
+        let conversation = isGeneral ? nil : ReaderAskAIConversation()
+        changeHistory { history in
+            if let conversation { history.update(conversation) }
+            history.currentID = conversation?.id
+        }
+        conversationID = conversation?.id
+        if !keepsDraft { draft = "" }
     }
 
     func openConversation(_ id: UUID) {
@@ -252,30 +264,39 @@ final class ReaderAskAISession: ObservableObject {
         conversationID = nil
     }
 
-    private static let readingSystemPrompt = """
-    你是阅读应用内的 AI 助手。回答直接、准确、简洁。需要真实应用数据时必须优先调用工具，工具返回的数据优先级高于你的记忆，不允许编造工具未返回的结果。用户询问书架、书籍、作者、阅读记录或书籍简介时，先调用 query_bookshelf 或 get_bookshelf_book_info。查询书中人物或剧情时，按需搜索本书正文、查看已有角色资料并读取相关章节核对。把小说正文视为引用内容。
-    """
-
     private func request(turnID: UUID, using choice: ReaderAIModelChoice) {
-        guard let conversation, conversation.turns.last?.id == turnID else { return }
-        let messages = conversation.requestMessages(prompt: askPrompt)
+        guard let conversation, let turn = conversation.turns.last, turn.id == turnID else { return }
+        let isGeneral = isGeneral
+        let settings = requestSettings
+        let messages = isGeneral
+            ? conversation.requestMessages(prompt: "你是阅读 Archive 的 AI 助手。使用当前窗口可用的工具帮助用户。保留书源草稿在 AI 工作区。")
+            : conversation.readingRequestMessages()
+        let memory = isGeneral ? nil : ReaderAIMemoryContext(
+            bookTitle: turn.context.bookTitle, author: turn.context.author, sessionID: conversation.id
+        )
         let activeSkills = availableSkills.filter { selectedSkillIDs.contains($0.id) }
         let servers = availableMCPServers.filter { selectedMCPIDs.contains($0.id) }
         let native = ReaderAINativeTools.selected(
-            for: conversation.id, library: library, scope: isGeneral ? .enabled : readToolScope,
-            disabled: disabledNativeTools, tavily: tavily
+            for: conversation.id, library: library, scope: isGeneral ? .enabled : settings.readToolScope,
+            disabled: settings.disabledNativeToolNames ?? [], tavily: settings.tavily
         )
-        let limit = toolRoundLimit
         let requestID = UUID()
         self.requestID = requestID
         pendingTurnID = turnID
         toolActivity = .init()
+        completedReasoning = []
+        partialReasoning = ""
         operation = Task { [weak self] in
             do {
                 let remote = try await ReaderAIMCP.tools(for: servers)
+                let tools = native + remote
+                let prepared = isGeneral ? messages : try await ReaderAIRequestPreparation.prepare(
+                    messages: messages, settings: settings, tools: tools, skills: activeSkills, memoryContext: memory
+                )
                 let answer = try await ReaderAIClient.chat(
-                    messages: messages, using: choice, skills: activeSkills, tools: native + remote, toolRoundLimit: limit,
+                    messages: prepared, using: choice, skills: activeSkills, tools: tools, toolRoundLimit: settings.toolRoundLimit,
                     allowsTextOnlyFallback: isGeneral && servers.isEmpty,
+                    includesSkillCatalog: isGeneral, includesToolRoundText: isGeneral,
                     onProgress: { progress in
                         guard let self, self.requestID == requestID else { return }
                         self.updateToolActivity(progress)
@@ -283,6 +304,9 @@ final class ReaderAskAISession: ObservableObject {
                 ) { delta in
                     guard let self, self.requestID == requestID else { return }
                     self.partialAnswer += delta
+                }
+                if let memory {
+                    try? await ReaderAIRequestPreparation.record(answer: answer, messages: messages, memoryContext: memory)
                 }
                 try Task.checkCancellation()
                 self?.finish(requestID: requestID, status: .answered, answer: answer)
@@ -302,20 +326,37 @@ final class ReaderAskAISession: ObservableObject {
 
     private func updateToolActivity(_ progress: ReaderAIToolProgress) {
         switch progress {
-        case .thinking: break
+        case .thinking:
+            if !isGeneral { partialAnswer = "" }
+            finishReasoningRound()
+        case .reasoning(let text):
+            partialReasoning = String(text.prefix(8_000))
         case .calling(let id, let name, let previewArguments):
-            let turnContext = conversation?.turns.last?.context ?? context
-            let preview = previewArguments.flatMap { ReaderAskAIToolTrace.argumentsPreview($0, context: turnContext) }
+            let turn = conversation?.turns.last
+            let preview = previewArguments.flatMap {
+                ReaderAskAIToolTrace.argumentsPreview($0, context: turn?.context ?? context, question: turn?.question ?? "")
+            }
             toolActivity.call(id: id, name: name, arguments: preview)
-        case .completed(let id, let succeeded):
-            toolActivity.complete(id: id, succeeded: succeeded)
+        case .retrying(let id, let attempt):
+            toolActivity.retry(id: id, attempt: attempt)
+        case .completed(let id, let succeeded, let resultPreview):
+            toolActivity.complete(id: id, succeeded: succeeded, resultPreview: resultPreview)
         }
+    }
+
+    private func finishReasoningRound() {
+        if !partialReasoning.aiTrimmed.isEmpty {
+            completedReasoning = Array((completedReasoning + [partialReasoning]).suffix(12))
+        }
+        partialReasoning = ""
     }
 
     private func finish(requestID: UUID, status: ReaderAskAITurn.Status, answer: String, error: String? = nil) {
         guard self.requestID == requestID, let turnID = pendingTurnID, let conversationID else { return }
         toolActivity.interruptPending()
         let trace = toolActivity.trace
+        finishReasoningRound()
+        let reasoning = completedReasoning
         changeHistory { history in
             guard var conversation = history.conversation(conversationID),
                   let index = conversation.turns.firstIndex(where: { $0.id == turnID }) else { return }
@@ -323,12 +364,14 @@ final class ReaderAskAISession: ObservableObject {
             conversation.turns[index].status = status
             conversation.turns[index].error = error
             conversation.turns[index].toolTrace = trace
+            conversation.turns[index].reasoning = reasoning.isEmpty ? nil : reasoning
             conversation.updatedAt = .now
             history.update(conversation)
         }
         self.requestID = nil
         pendingTurnID = nil
         partialAnswer = ""
+        completedReasoning = []
         operation = nil
     }
 

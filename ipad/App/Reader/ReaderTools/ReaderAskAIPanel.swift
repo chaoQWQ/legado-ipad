@@ -111,6 +111,12 @@ struct ReaderAskAIPanel: View {
                         ToolbarItem(placement: .confirmationAction) { Button("完成") { activeSheet = nil } }
                     }
                 }
+            case .worldBooks:
+                NavigationStack {
+                    ReaderAIWorldBookSettingsView(bindingsOnly: true).toolbar {
+                        ToolbarItem(placement: .confirmationAction) { Button("完成") { activeSheet = nil } }
+                    }
+                }
             }
         }
         .alert("清空所有\(historyTitle)？", isPresented: $confirmsClear) {
@@ -166,6 +172,17 @@ struct ReaderAskAIPanel: View {
                     activeSheet = .mcp
                 }
                 .disabled(session.isRequesting)
+                if !session.isGeneral {
+                    Button("当前窗口世界书", systemImage: "books.vertical") { activeSheet = .worldBooks }
+                        .disabled(session.isRequesting)
+                }
+                if !session.selectedSkillIDs.isEmpty || !session.selectedMCPIDs.isEmpty {
+                    Button("清空当前窗口 Skill 和 MCP", systemImage: "xmark.circle") {
+                        session.chooseSkills([])
+                        session.chooseMCPServers([])
+                    }
+                    .disabled(session.isRequesting)
+                }
                 Button("AI 工作区", systemImage: "folder") { activeSheet = .workspace }
                 #if os(iOS)
                 if #available(iOS 18.0, *) {
@@ -292,6 +309,9 @@ struct ReaderAskAIPanel: View {
         let pending = turn.id == session.pendingTurnID
         let answer = pending ? session.partialAnswer : turn.answer
         let trace = pending ? session.toolActivity.trace : turn.toolTrace
+        let reasoning = pending
+            ? session.completedReasoning + (session.partialReasoning.isEmpty ? [] : [session.partialReasoning])
+            : turn.reasoning ?? []
         return VStack(spacing: 10) {
             bubble(isQuestion: true) {
                 Text(turn.question)
@@ -305,6 +325,18 @@ struct ReaderAskAIPanel: View {
                     }
                     .font(.footnote)
                 }
+            }
+            if session.showsThinkingToolbar && !reasoning.isEmpty {
+                DisclosureGroup("模型思考摘要") {
+                    Text(reasoning.joined(separator: "\n\n"))
+                        .font(.footnote)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 6)
+                }
+                .font(.subheadline)
+                .padding(12)
+                .background(.quaternary.opacity(0.45), in: .rect(cornerRadius: 12))
             }
             if session.showsThinkingToolbar, let trace {
                 ReaderAskAIToolTraceView(trace: trace)
@@ -467,7 +499,7 @@ struct ReaderAskAIPanel: View {
     private enum ScrollTarget { case latest }
 
     private enum PanelSheet: Identifiable {
-        case settings, skills, mcp, workspace
+        case settings, skills, mcp, workspace, worldBooks
 
         var id: Self { self }
     }

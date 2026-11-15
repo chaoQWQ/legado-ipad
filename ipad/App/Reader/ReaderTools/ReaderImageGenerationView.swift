@@ -4,16 +4,18 @@ struct ReaderImageGenerationView: View {
     let context: ReaderImageContext
 
     @Environment(\.dismiss) private var dismiss
-    @ObservedObject private var gallery = ReaderImageGalleryStore.shared
-    @State private var settings = ReaderAISettings()
+    @EnvironmentObject private var library: LibraryStore
     @State private var prompt: String
-    @State private var activeOperation: Operation?
+    @State private var activeStage: Stage?
     @State private var operation: Task<Void, Never>?
+    @State private var manualRewrite: Task<Void, Never>?
     @State private var resultID: UUID?
     @State private var resultPreview: CGImage?
-    @State private var showsGallery = false
-    @State private var errorMessage: String?
+    @State private var failure: Failure?
+    @State private var rewriteFailure: Failure?
     @State private var attemptedInitialGeneration = false
+    @State private var optimizerConversationID = UUID()
+    private let gallery = ReaderImageGalleryStore.shared
 
     init(context: ReaderImageContext) {
         self.context = context
@@ -21,189 +23,216 @@ struct ReaderImageGenerationView: View {
         _prompt = State(initialValue: selection.isEmpty ? context.paragraphText?.aiTrimmed ?? "" : selection)
     }
 
-    private var result: ReaderImageGalleryEntry? { gallery.entries.first { $0.id == resultID } }
-    private var provider: ReaderAIImageProvider? { settings.enabled ? settings.defaultImageProvider : nil }
-    private var cleanPrompt: String { prompt.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var cleanPrompt: String { prompt.aiTrimmed }
+    private var visibleStage: Stage? { activeStage ?? (manualRewrite == nil ? nil : .rewrite) }
+    private var visibleFailure: Failure? { failure ?? rewriteFailure }
 
     var body: some View {
         NavigationStack {
-            Form {
-                if result != nil {
-                    Section("生成结果") {
-                        if let resultPreview {
-                            Image(resultPreview, scale: 1, label: Text("生成的图片"))
-                                .resizable()
-                                .scaledToFit()
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 8)
-                        } else {
-                            Label("无法预览图片", systemImage: "photo")
-                                .foregroundStyle(.secondary)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    previewPane
+                    if resultPreview != nil {
+                        if let visibleStage {
+                            ProgressView(visibleStage.label).font(.footnote)
+                        } else if let visibleFailure {
+                            failureNotice(visibleFailure)
                         }
                     }
+                    Text("图片提示词").font(.subheadline).foregroundStyle(.secondary)
+                    ReaderImagePromptEditor(text: $prompt, isEditable: activeStage != .rewrite)
+                        .frame(height: 108)
+                        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+                    actions
                 }
-                configuration
-                Section("图片提示词") {
-                    TextEditor(text: $prompt)
-                        .frame(minHeight: 108)
-                        .accessibilityLabel("可编辑的图片提示词")
-                        .disabled(activeOperation != nil)
-                }
-                actions
-                if let result { resultActions(result) }
+                .frame(maxWidth: 720)
+                .padding(16)
+                .frame(maxWidth: .infinity)
             }
-            .navigationTitle("选中文本生图")
+            .scrollBounceBehavior(.basedOnSize)
+            .navigationTitle("生图")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button("AI 图库", systemImage: "photo.on.rectangle") { showsGallery = true }
-                        .disabled(activeOperation != nil)
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") { dismiss() }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭", systemImage: "xmark") { dismiss() }
                 }
             }
             .onAppear {
-                refreshSettings()
                 guard !attemptedInitialGeneration else { return }
                 attemptedInitialGeneration = true
-                generate()
-            }
-            .sheet(isPresented: $showsGallery) {
-                NavigationStack {
-                    ReaderImageGalleryView()
-                        .toolbar {
-                            ToolbarItem(placement: .confirmationAction) {
-                                Button("完成") { showsGallery = false }
-                            }
-                        }
-                }
+                run(.initial)
             }
         }
-        .onDisappear { operation?.cancel() }
+        .onDisappear {
+            operation?.cancel()
+            manualRewrite?.cancel()
+        }
     }
 
-    private var configuration: some View {
-        Section("图像模型") {
-            if let provider {
-                let model = provider.resolvedModelName
-                let title = provider.title == model ? model : "\(provider.title) · \(model)"
-                LabeledContent("模型", value: title)
-            }
-            NavigationLink("配置 AI 服务") { ReaderAISettingsView() }
-                .disabled(activeOperation != nil)
-            if !settings.enabled {
-                Text("AI 已关闭。").foregroundStyle(.secondary)
-            } else if provider == nil {
-                Text("请先配置生图供应商。").foregroundStyle(.secondary)
+    private var previewPane: some View {
+        ZStack {
+            Color(uiColor: .secondarySystemBackground)
+            if let resultPreview {
+                ReaderZoomableImage(image: resultPreview)
+                    .id(resultID)
+            } else if visibleStage != nil || !attemptedInitialGeneration {
+                ProgressView((visibleStage ?? .rewrite).label)
+            } else if let visibleFailure {
+                failureNotice(visibleFailure).padding(20)
             }
         }
+        .frame(height: 330)
+        .frame(maxWidth: .infinity)
+        .clipShape(.rect(cornerRadius: 12))
     }
 
     private var actions: some View {
-        Section {
-            if let activeOperation {
-                ProgressView(activeOperation.label)
-                if activeOperation != .insert {
-                    Button("取消请求", role: .cancel) { operation?.cancel() }
-                }
-            } else {
-                Button(result == nil ? "生成图片" : "重新生成", systemImage: "sparkles") {
-                    refreshSettings()
-                    generate()
-                }
-                    .disabled(provider == nil || cleanPrompt.isEmpty)
-                if settings.enabled, settings.defaultChatChoice != nil {
-                    Button("优化提示词", systemImage: "wand.and.stars", action: optimize)
-                        .disabled(cleanPrompt.isEmpty)
-                }
-            }
-            if let errorMessage {
-                Label(errorMessage, systemImage: "exclamationmark.circle")
-                    .foregroundStyle(.red)
-            }
-        } footer: {
-            if let provider {
-                Text("\(provider.title) 会收到提示词和供应商设置的画风。优化提示词会使用当前段落和书籍资料。")
-            }
+        HStack(spacing: 8) {
+            Button("优化提示词") { run(.rewrite) }
+                .disabled(cleanPrompt.isEmpty || manualRewrite != nil)
+            Button("重新生成") { run(.generate) }
+                .disabled(cleanPrompt.isEmpty)
+            Button("插入正文") { run(.insert) }
+                .buttonStyle(.borderedProminent)
+                .disabled(resultID == nil || !context.canInsert)
         }
+        .buttonStyle(.bordered)
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .disabled(activeStage != nil)
     }
 
-    private func resultActions(_ entry: ReaderImageGalleryEntry) -> some View {
-        Section {
-            if context.canInsert {
-                Button(entry.isInserted ? "已插入正文" : "插入正文", systemImage: entry.isInserted ? "checkmark" : "text.badge.plus") {
-                    run(.insert) {
-                        try await gallery.setInserted(true, for: entry.id)
-                        dismiss()
-                    }
-                }
-                .disabled(activeOperation != nil || entry.isInserted)
-            }
-            Button(entry.isFavorite ? "取消收藏" : "收藏到图库", systemImage: entry.isFavorite ? "heart.slash" : "heart") {
-                Task {
-                    do { try await gallery.setFavorite(!entry.isFavorite, for: entry.id) }
-                    catch { errorMessage = error.localizedDescription }
-                }
-            }
-            .disabled(activeOperation != nil)
-            ShareLink(item: gallery.fileURL(for: entry)) {
-                Label("分享或保存", systemImage: "square.and.arrow.up")
-            }
-        } footer: {
-            if !entry.isFavorite && !entry.isInserted {
-                Text("图片会暂存三天，收藏后保留。")
-            }
+    private func failureNotice(_ failure: Failure) -> some View {
+        VStack(spacing: 8) {
+            Text(failure.message)
+                .font(.footnote)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+            Button("重试") { run(failure.action) }
+                .buttonStyle(.bordered)
+                .disabled(activeStage != nil || (failure.action != .insert && cleanPrompt.isEmpty))
         }
+        .frame(maxWidth: .infinity)
     }
 
-    private func refreshSettings() {
-        do {
-            settings = try ReaderAISettings.load()
-        } catch {
-            settings = ReaderAISettings()
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    private func generate() {
+    private func run(_ action: Action) {
+        guard activeStage == nil else { return }
         let text = cleanPrompt
-        guard let provider, !text.isEmpty else { return }
-        run(.generate) {
-            resultID = nil
-            resultPreview = nil
-            let data = try await ReaderAIClient.generateImage(prompt: text, provider: provider)
-            try Task.checkCancellation()
-            let entry = try await gallery.store(
-                data, prompt: text, provider: provider.title, model: provider.resolvedModelName, context: context
-            )
-            let url = gallery.fileURL(for: entry)
-            let preview = await Task.detached(priority: .userInitiated) {
-                ReaderGalleryPicture.thumbnail(at: url, maxDimension: 1_200)
-            }.value
-            try Task.checkCancellation()
-            resultPreview = preview
-            resultID = entry.id
+        guard action == .insert || !text.isEmpty else {
+            failure = Failure(action: action, message: "请输入生图提示词。")
+            return
+        }
+        if action == .rewrite {
+            startManualRewrite(text)
+            return
+        }
+        let previousResult = resultID
+        failure = nil
+        rewriteFailure = nil
+        activeStage = action.stage
+        operation = Task {
+            var retry = action
+            defer {
+                operation = nil
+                activeStage = nil
+            }
+            do {
+                if action == .insert {
+                    guard let previousResult else { return }
+                    try await gallery.setInserted(true, for: previousResult)
+                    dismiss()
+                    return
+                }
+                let settings = try ReaderAISettings.load()
+                let provider = try imageProvider(in: settings)
+                var promptToSend = text
+                if action == .initial {
+                    promptToSend = try await rewrite(text, using: settings)
+                    try Task.checkCancellation()
+                    prompt = promptToSend
+                    retry = .generate
+                    activeStage = .generate
+                }
+                try await generate(promptToSend, using: provider)
+            } catch {
+                if !Task.isCancelled {
+                    failure = makeFailure(for: retry, from: error)
+                }
+            }
         }
     }
 
-    private func optimize() {
-        refreshSettings()
-        let text = cleanPrompt
-        guard settings.enabled, let endpoint = settings.defaultChatChoice, !text.isEmpty else { return }
-        run(.rewrite) {
-            let characters: [ReaderBookCharacter]
-            if let bookID = context.bookID {
-                characters = try await ReaderBookCharacterStore.shared.characters(for: bookID)
-            } else {
-                characters = []
+    private func startManualRewrite(_ text: String) {
+        guard manualRewrite == nil else { return }
+        if failure?.action == .initial { failure = nil }
+        rewriteFailure = nil
+        manualRewrite = Task {
+            defer { manualRewrite = nil }
+            do {
+                let rewritten = try await rewrite(text, using: ReaderAISettings.load())
+                try Task.checkCancellation()
+                prompt = rewritten
+            } catch {
+                if !Task.isCancelled { rewriteFailure = makeFailure(for: .rewrite, from: error) }
             }
-            let response = try await ReaderAIClient.chat(messages: [
-                ReaderAIChatMessage(role: .user, content: optimizerPrompt(for: text, characters: characters))
-            ], using: endpoint)
-            try Task.checkCancellation()
-            let rewritten = Self.cleanedResponse(response)
-            prompt = rewritten.isEmpty ? text : rewritten
         }
+    }
+
+    private func makeFailure(for action: Action, from error: Error) -> Failure {
+        let description = error.localizedDescription
+        switch error {
+        case ImageDialogError.missingImageProvider, ImageDialogError.missingChatModel:
+            return Failure(action: action, message: description)
+        default:
+            return Failure(action: action, message: "\(action.stage.failureLabel)。\(description)")
+        }
+    }
+
+    private func imageProvider(in settings: ReaderAISettings) throws -> ReaderAIImageProvider {
+        guard let provider = settings.defaultImageProvider else { throw ImageDialogError.missingImageProvider }
+        return provider
+    }
+
+    private func generate(_ text: String, using provider: ReaderAIImageProvider) async throws {
+        resultID = nil
+        resultPreview = nil
+        let data = try await ReaderAIClient.generateImage(prompt: text, provider: provider)
+        try Task.checkCancellation()
+        let entry = try await gallery.store(
+            data, prompt: text, provider: provider.title, model: provider.resolvedModelName, context: context
+        )
+        let url = gallery.fileURL(for: entry)
+        let preview = await Task.detached(priority: .userInitiated) {
+            ReaderGalleryPicture.thumbnail(at: url, maxDimension: 1_800)
+        }.value
+        try Task.checkCancellation()
+        guard let preview else { throw ImageDialogError.previewFailed }
+        resultPreview = preview
+        resultID = entry.id
+    }
+
+    private func rewrite(_ text: String, using settings: ReaderAISettings) async throws -> String {
+        guard let choice = settings.defaultChatChoice else { throw ImageDialogError.missingChatModel }
+        let characters: [ReaderBookCharacter]
+        if let bookID = context.bookID {
+            characters = try await ReaderBookCharacterStore.shared.characters(for: bookID)
+        } else {
+            characters = []
+        }
+        let tools = ReaderAINativeTools.selected(
+            for: optimizerConversationID, library: library, scope: .enabled,
+            disabled: settings.disabledNativeToolNames ?? [], tavily: settings.tavily
+        )
+        let messages = try await ReaderAIRequestPreparation.prepare(
+            messages: [ReaderAIChatMessage(role: .user, content: optimizerPrompt(for: text, characters: characters))],
+            settings: settings, tools: tools
+        )
+        let response = try await ReaderAIClient.chat(
+            messages: messages, using: choice, tools: tools, toolRoundLimit: settings.toolRoundLimit,
+            includesToolRoundText: false
+        )
+        let rewritten = Self.cleanedResponse(response)
+        guard !rewritten.isEmpty else { throw ImageDialogError.emptyRewrite }
+        return rewritten
     }
 
     private func optimizerPrompt(for prompt: String, characters: [ReaderBookCharacter]) -> String {
@@ -237,42 +266,70 @@ struct ReaderImageGenerationView: View {
         """
     }
 
-    private func run(_ kind: Operation, action: @escaping @MainActor () async throws -> Void) {
-        guard activeOperation == nil else { return }
-        errorMessage = nil
-        activeOperation = kind
-        operation = Task {
-            defer {
-                operation = nil
-                activeOperation = nil
-            }
-            do { try await action() }
-            catch {
-                if !Task.isCancelled { errorMessage = error.localizedDescription }
-            }
-        }
-    }
-
     private static func cleanedResponse(_ result: String) -> String {
-        var text = result.trimmingCharacters(in: .whitespacesAndNewlines)
-        if text.hasPrefix("```"), text.hasSuffix("```"), let lineEnd = text.firstIndex(of: "\n") {
-            text = String(text[text.index(after: lineEnd)...].dropLast(3))
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+        var text = result.aiTrimmed
+        if text.hasPrefix("```"), text.hasSuffix("```"), text.count >= 6 {
+            let fenced = text.dropFirst(3).dropLast(3)
+            if let lineEnd = fenced.firstIndex(of: "\n"),
+               ["text", "plaintext", "markdown"].contains(String(fenced[..<lineEnd]).lowercased()) {
+                text = String(fenced[fenced.index(after: lineEnd)...]).aiTrimmed
+            } else {
+                text = String(fenced).aiTrimmed
+            }
         }
-        if (text.hasPrefix("“") && text.hasSuffix("”")) ||
+        if text.count >= 2, (text.hasPrefix("“") && text.hasSuffix("”")) ||
             (text.hasPrefix("\"") && text.hasSuffix("\"")) {
-            text = String(text.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+            text = String(text.dropFirst().dropLast()).aiTrimmed
         }
         return text
     }
 
-    private enum Operation {
-        case generate, rewrite, insert
+    private enum Action {
+        case initial, rewrite, generate, insert
+
+        var stage: Stage {
+            switch self {
+            case .initial, .rewrite: .rewrite
+            case .generate: .generate
+            case .insert: .insert
+            }
+        }
+    }
+
+    private enum Stage {
+        case rewrite, generate, insert
+
         var label: String {
             switch self {
-            case .generate: "正在生成图片"
             case .rewrite: "正在优化提示词"
+            case .generate: "正在生成图片"
             case .insert: "正在插入正文"
+            }
+        }
+
+        var failureLabel: String {
+            switch self {
+            case .rewrite: "提示词优化失败"
+            case .generate: "图片生成失败"
+            case .insert: "插入正文失败"
+            }
+        }
+    }
+
+    private struct Failure {
+        let action: Action
+        let message: String
+    }
+
+    private enum ImageDialogError: LocalizedError {
+        case missingImageProvider, missingChatModel, emptyRewrite, previewFailed
+
+        var errorDescription: String? {
+            switch self {
+            case .missingImageProvider: "请先在 AI 设置中启用生图供应商。"
+            case .missingChatModel: "请先在 AI 设置中配置通用聊天模型。"
+            case .emptyRewrite: "聊天模型没有返回可用的提示词。"
+            case .previewFailed: "无法预览供应商返回的图片。"
             }
         }
     }

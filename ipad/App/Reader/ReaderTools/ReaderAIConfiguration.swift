@@ -38,6 +38,14 @@ struct ReaderAIModelChoice: Equatable, Identifiable, Sendable {
 }
 
 struct ReaderAIImageProvider: Codable, Equatable, Identifiable, Sendable {
+    enum Kind: String, Codable, CaseIterable, Identifiable, Sendable {
+        case openAI = "openai"
+        case script = "js"
+
+        var id: Self { self }
+        var title: String { self == .script ? "JS 生图规则" : "OpenAI 兼容" }
+    }
+
     var id = UUID().uuidString
     var name = ""
     var address = "https://api.openai.com/v1"
@@ -49,6 +57,14 @@ struct ReaderAIImageProvider: Codable, Equatable, Identifiable, Sendable {
     var stylePrompt = ""
     var timeoutMilliseconds = 120_000
     var enabled = true
+    var configuredKind: Kind?
+    var script: String?
+    var scriptLibrary: String?
+
+    var kind: Kind {
+        get { configuredKind ?? .openAI }
+        set { configuredKind = newValue }
+    }
 
     var title: String {
         if !name.aiTrimmed.isEmpty { return name.aiTrimmed }
@@ -57,6 +73,7 @@ struct ReaderAIImageProvider: Codable, Equatable, Identifiable, Sendable {
     }
 
     var resolvedModelName: String {
+        if kind == .script { return model.aiTrimmed.isEmpty ? "JavaScript" : model.aiTrimmed }
         let parameters = (try? parameters()) ?? [:]
         if usesResponses(parameters: parameters), let imageModel = resolvedImageToolModel(parameters: parameters) {
             return imageModel
@@ -119,12 +136,15 @@ struct ReaderAISettings: Codable, Sendable {
     var configuredReadToolScope: ReaderAIToolScope?
     var configuredReturnToSend: Bool?
     var configuredThinkingToolbar: Bool?
+    var configuredContextCompressionEnabled: Bool?
+    var configuredContextWindowTokens: Int?
     private var configuredTavily: ReaderAITavilyConfig?
 
     private enum CodingKeys: String, CodingKey {
         case enabled, providers, models, imageProviders, defaultModelID, askModelID, imageProviderID, askPrompt
         case configuredMCPServers, disabledNativeToolNames, configuredToolRoundLimit, configuredReadToolScope
         case configuredReturnToSend, configuredThinkingToolbar
+        case configuredContextCompressionEnabled, configuredContextWindowTokens
         case configuredTavily
     }
 
@@ -151,6 +171,16 @@ struct ReaderAISettings: Codable, Sendable {
     var showsThinkingToolbar: Bool {
         get { configuredThinkingToolbar ?? true }
         set { configuredThinkingToolbar = newValue }
+    }
+
+    var contextCompressionEnabled: Bool {
+        get { configuredContextCompressionEnabled ?? false }
+        set { configuredContextCompressionEnabled = newValue }
+    }
+
+    var contextWindowTokens: Int {
+        get { min(2_000_000, max(8_000, configuredContextWindowTokens ?? 258_000)) }
+        set { configuredContextWindowTokens = min(2_000_000, max(8_000, newValue)) }
     }
 
     var tavily: ReaderAITavilyConfig {
@@ -256,7 +286,12 @@ struct ReaderAISettings: Codable, Sendable {
             _ = try ReaderAIHeaders.parse(provider.headers)
         }
         for provider in imageProviders {
-            _ = try ReaderAIEndpoint.make(provider.address, route: "images/generations")
+            if provider.kind == .openAI || !provider.address.aiTrimmed.isEmpty {
+                _ = try ReaderAIEndpoint.make(provider.address, route: "images/generations")
+            }
+            if provider.kind == .script && (provider.script ?? "").aiTrimmed.isEmpty {
+                throw ReaderAIError.provider("请填写生图脚本。")
+            }
             _ = try provider.parameters()
             _ = try ReaderAIHeaders.parse(provider.headers)
         }

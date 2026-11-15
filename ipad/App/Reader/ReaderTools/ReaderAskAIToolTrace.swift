@@ -11,6 +11,8 @@ struct ReaderAskAIToolTrace: Codable {
         let name: String
         let argumentsPreview: String?
         var status: Status
+        var resultPreview: String? = nil
+        var attempts: Int? = nil
     }
 
     let count: Int
@@ -24,10 +26,10 @@ struct ReaderAskAIToolTrace: Codable {
 
     static func acceptsArguments(for tool: String) -> Bool { previewTools.contains(tool) }
 
-    static func argumentsPreview(_ raw: String, context: ReaderAskAIContext) -> String? {
+    static func argumentsPreview(_ raw: String, context: ReaderAskAIContext, question: String = "") -> String? {
         guard raw.utf8.count <= 8_192, let decoded = try? JSONSerialization.jsonObject(with: Data(raw.utf8)),
               let arguments = decoded as? [String: Any] else { return nil }
-        let trustedText = [context.bookTitle, context.author, context.chapterTitle, context.excerpt]
+        let trustedText = [context.bookTitle, context.author, context.chapterTitle, context.excerpt, question]
             .filter { !$0.isEmpty }
             .map(normalized)
         let approvedText = ["query", "keyword", "name", "bookName", "author", "chapterTitle"]
@@ -55,6 +57,49 @@ struct ReaderAskAIToolTrace: Codable {
         guard !displayed.isEmpty, let json = try? ReaderAITool.json(displayed) else { return nil }
         return json.count > 200 ? String(json.prefix(199)) + "…" : json
     }
+
+    static func resultPreview(for tool: String, result: [String: Any]?, succeeded: Bool) -> String? {
+        guard previewTools.contains(tool) else { return nil }
+        guard succeeded, let result else { return "工具未返回可用结果。" }
+        switch tool {
+        case "query_bookshelf":
+            let size = count(in: result["matchedBooks"])
+            let total = (result["summary"] as? [String: Any]).flatMap { number($0["bookCount"]) }
+            return ["命中 \(size) 本", total.map { "书架共 \($0) 本" }].compactMap { $0 }.joined(separator: " · ")
+        case "get_bookshelf_book_info":
+            return "返回 \(count(in: result["books"])) 本书的资料"
+        case "list_book_chapters":
+            let chapters = result["chapters"] as? [[String: Any]] ?? []
+            let cached = chapters.filter { $0["cached"] as? Bool == true }.count
+            return "返回 \(chapters.count) 章目录，其中 \(cached) 章有缓存"
+        case "search_book_chapter_content":
+            let chapters = number(result["scannedChapters"]) ?? 0
+            let cached = number(result["scannedCachedContent"]) ?? 0
+            let matches = result["results"] as? [[String: Any]] ?? []
+            let indices = matches.prefix(8).compactMap { number($0["chapterIndex"]) }.map { String($0 + 1) }
+            let locations = indices.isEmpty ? "" : " · 章序 \(indices.joined(separator: "、"))"
+            return "扫描范围 \(chapters) 章 · 查到 \(cached) 章缓存正文 · \(matches.count) 处命中\(locations)"
+        case "read_book_chapter_content":
+            let chapter = result["chapter"] as? [String: Any]
+            let index = number(chapter?["index"])
+            let source = index.map { "第 \($0 + 1) 章 · " } ?? ""
+            let length = (result["content"] as? String)?.utf16.count ?? 0
+            let truncated = result["truncated"] as? Bool == true ? " · 已按长度截断" : ""
+            return "\(source)返回 \(length) 字\(truncated)"
+        case "list_book_characters":
+            return "返回 \(count(in: result["characters"])) 条角色资料"
+        default:
+            return nil
+        }
+    }
+
+    private static func number(_ value: Any?) -> Int? {
+        guard let value = value as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID(),
+              let integer = Int(exactly: value.doubleValue), (0...1_000_000).contains(integer) else { return nil }
+        return integer
+    }
+
+    private static func count(in value: Any?) -> Int { (value as? [Any])?.count ?? 0 }
 
     private static func normalized(_ text: String) -> String {
         text.filter { !$0.isWhitespace }.lowercased()

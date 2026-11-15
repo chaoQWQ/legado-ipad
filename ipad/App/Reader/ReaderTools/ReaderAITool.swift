@@ -1,3 +1,4 @@
+import BookSources
 import Foundation
 
 struct ReaderAITool: Identifiable {
@@ -5,6 +6,7 @@ struct ReaderAITool: Identifiable {
     let description: String
     let parameters: [String: Any]
     let invoke: (String) async throws -> String
+    var retriesTransientReads = false
 
     var id: String { name }
 
@@ -24,6 +26,20 @@ struct ReaderAITool: Identifiable {
     static func failure(_ message: String) -> String {
         (try? json(["ok": false, "error": String(message.prefix(512))])) ?? "{\"ok\":false}"
     }
+
+    static func transientReadFailure(_ error: Error) -> String? {
+        if let sourceError = error as? BookSourceError, case .badStatus(let status) = sourceError,
+           [408, 429, 500, 502, 503, 504].contains(status) {
+            return "书源暂时无法读取（HTTP \(status)）。"
+        }
+        guard let error = error as? URLError else { return nil }
+        switch error.code {
+        case .timedOut, .networkConnectionLost, .cannotConnectToHost, .dnsLookupFailed, .notConnectedToInternet:
+            return "读取正文时网络连接暂时不可用。"
+        default:
+            return nil
+        }
+    }
 }
 
 enum ReaderAIToolScope: String, CaseIterable, Identifiable, Codable {
@@ -41,6 +57,8 @@ enum ReaderAIToolScope: String, CaseIterable, Identifiable, Codable {
 
 enum ReaderAIToolProgress {
     case thinking
+    case reasoning(String)
     case calling(id: String, name: String, previewArguments: String?)
-    case completed(id: String, succeeded: Bool)
+    case retrying(id: String, attempt: Int)
+    case completed(id: String, succeeded: Bool, resultPreview: String?)
 }

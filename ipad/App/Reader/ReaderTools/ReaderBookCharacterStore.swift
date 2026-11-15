@@ -12,6 +12,43 @@ struct ReaderBookCharacter: Codable, Sendable {
     let biography: String?
     let roleLevel: Int?
     let sortOrder: Int?
+
+    var toolProfile: [String: Any] {
+        let genderCode: String
+        let genderLabel: String
+        switch gender?.aiTrimmed.lowercased() {
+        case "male", "m", "man", "男", "男性", "男声":
+            genderCode = "male"
+            genderLabel = "男"
+        case "female", "f", "woman", "女", "女性", "女声":
+            genderCode = "female"
+            genderLabel = "女"
+        default:
+            genderCode = ""
+            genderLabel = "未知"
+        }
+        let level = roleLevel ?? 0
+        let roleLabel = level == 2 ? "主角" : level == 1 ? "重要角色" : "普通角色"
+        var age = ""
+        var profileAttributes: [String] = []
+        for line in (attributes ?? "").split(omittingEmptySubsequences: false, whereSeparator: \.isNewline) {
+            if let separator = line.firstIndex(where: { $0 == "：" || $0 == ":" }),
+               ["年纪", "年龄"].contains(String(line[..<separator]).aiTrimmed) {
+                if age.isEmpty { age = String(String(line[line.index(after: separator)...]).aiTrimmed.prefix(40)) }
+            } else {
+                profileAttributes.append(String(line))
+            }
+        }
+        var profile: [String: Any] = [
+            "name": name, "gender": genderCode, "genderLabel": genderLabel, "ageStage": age,
+            "identity": identity ?? "", "skills": skills ?? "", "appearance": appearance ?? "",
+            "personality": personality ?? "", "biography": biography ?? "", "roleLevel": level,
+            "roleLabel": roleLabel, "attributes": profileAttributes.joined(separator: "\n").aiTrimmed
+        ]
+        if let id { profile["id"] = id }
+        if let sortOrder { profile["sortOrder"] = sortOrder }
+        return profile
+    }
 }
 
 actor ReaderBookCharacterStore {

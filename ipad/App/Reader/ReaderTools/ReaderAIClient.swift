@@ -27,6 +27,8 @@ enum ReaderAIClient {
         tools: [ReaderAITool] = [],
         toolRoundLimit: Int = 32,
         allowsTextOnlyFallback: Bool = false,
+        includesSkillCatalog: Bool = true,
+        includesToolRoundText: Bool = true,
         onProgress: @MainActor (ReaderAIToolProgress) -> Void = { _ in },
         onDelta: @MainActor (String) -> Void = { _ in }
     ) async throws -> String {
@@ -49,7 +51,7 @@ enum ReaderAIClient {
         if provider.promptCache {
             body["prompt_cache_key"] = String("legado-reader-\(choice.id)".prefix(64))
         }
-        if !skillTool.skills.isEmpty {
+        if includesSkillCatalog && !skillTool.skills.isEmpty {
             let priorSystem = fields.prefix { $0["role"] as? String == "system" }.count
             fields.insert(["role": "system", "content": skillTool.catalog], at: priorSystem)
         }
@@ -77,7 +79,9 @@ enum ReaderAIClient {
             await onProgress(.thinking)
             let response: ChatStream
             do {
-                response = try await chatTurn(request, onDelta: onDelta)
+                response = try await chatTurn(request, onDelta: onDelta) { reasoning in
+                    onProgress(.reasoning(reasoning))
+                }
             } catch let error as ReaderAIError where round == 0 && mode == .chatCompletions
                 && !uniqueTools.isEmpty && error.requiresResponsesForTools {
                 // The provider rejected the request before running any tools.
@@ -88,17 +92,21 @@ enum ReaderAIClient {
                 return try await chat(
                     messages: messages, using: compatibleChoice, skills: skills, tools: tools,
                     toolRoundLimit: toolRoundLimit, allowsTextOnlyFallback: false,
+                    includesSkillCatalog: includesSkillCatalog, includesToolRoundText: includesToolRoundText,
                     onProgress: onProgress, onDelta: onDelta
                 )
             } catch let error as ReaderAIError where round == 0 && allowsTextOnlyFallback
                 && skillTool.skills.isEmpty && !tools.isEmpty && error.meansToolsUnsupported {
-                return try await chat(messages: messages, using: choice, onProgress: onProgress, onDelta: onDelta)
+                return try await chat(
+                    messages: messages, using: choice, includesToolRoundText: includesToolRoundText,
+                    onProgress: onProgress, onDelta: onDelta
+                )
             }
-            answer.append(response.text)
+            if includesToolRoundText { answer.append(response.text) }
             let calls = response.toolCalls
             guard !calls.isEmpty else {
                 guard !response.text.aiTrimmed.isEmpty else { throw ReaderAIError.emptyResponse }
-                return answer.aiTrimmed
+                return includesToolRoundText ? answer.aiTrimmed : response.text.aiTrimmed
             }
             guard !dispatched.isEmpty, calls.count <= 16, round < maxToolRounds else {
                 throw ReaderAIError.provider("AI 未能完成工具调用。")
@@ -120,13 +128,16 @@ enum ReaderAIClient {
                 let previewArguments = tool != nil && ReaderAskAIToolTrace.acceptsArguments(for: call.name)
                     ? call.arguments : nil
                 await onProgress(.calling(id: call.id, name: tool?.name ?? "未知工具", previewArguments: previewArguments))
-                let result = try await run(call, using: tool)
+                let result = try await run(call, using: tool, onProgress: onProgress)
                 let status = object(Data(result.utf8))
-                let reportedFailure = (status?["ok"] as? Bool == false) || (status?["isError"] as? Bool == true)
-                await onProgress(.completed(id: call.id, succeeded: !reportedFailure))
+                let succeeded = status?["ok"] as? Bool != false && status?["success"] as? Bool != false
+                    && status?["isError"] as? Bool != true
+                let resultPreview = tool?.retriesTransientReads == true
+                    ? ReaderAskAIToolTrace.resultPreview(for: call.name, result: status, succeeded: succeeded) : nil
+                await onProgress(.completed(id: call.id, succeeded: succeeded, resultPreview: resultPreview))
                 fields.append(call.output(result, for: mode))
             }
-            if !response.text.isEmpty {
+            if includesToolRoundText && !response.text.isEmpty {
                 answer.append("\n\n")
                 await onDelta("\n\n")
             }
@@ -134,39 +145,59 @@ enum ReaderAIClient {
         throw ReaderAIError.emptyResponse
     }
 
-    private static func run(_ call: ReaderAISkillTool.Call, using tool: ReaderAITool?) async throws -> String {
+    private static func run(
+        _ call: ReaderAISkillTool.Call, using tool: ReaderAITool?,
+        onProgress: @MainActor (ReaderAIToolProgress) -> Void
+    ) async throws -> String {
         guard let tool else { return ReaderAITool.failure("This tool is unavailable in the current window.") }
         guard call.arguments.utf8.count <= 768 * 1024 else { return ReaderAITool.failure("Tool input is too large.") }
-        do {
-            let result = try await tool.invoke(call.arguments)
-            try Task.checkCancellation()
-            return result.utf8.count <= 768 * 1024 ? result : ReaderAITool.failure("Tool result is too large. Narrow the request.")
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            try Task.checkCancellation()
-            return ReaderAITool.failure(error.localizedDescription)
+        var attempt = 1
+        while true {
+            do {
+                let result = try await tool.invoke(call.arguments)
+                try Task.checkCancellation()
+                guard !result.aiTrimmed.isEmpty else { return ReaderAITool.failure("工具返回为空。") }
+                return result.utf8.count <= 768 * 1024
+                    ? result : ReaderAITool.failure("Tool result is too large. Narrow the request.")
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                try Task.checkCancellation()
+                guard tool.retriesTransientReads else { return ReaderAITool.failure(error.localizedDescription) }
+                guard let reason = ReaderAITool.transientReadFailure(error) else {
+                    return ReaderAITool.failure("无法读取本地书籍资料。")
+                }
+                guard attempt < 3 else { return ReaderAITool.failure(reason) }
+                await onProgress(.retrying(id: call.id, attempt: attempt + 1))
+                try await Task.sleep(for: .milliseconds(600 * attempt))
+                attempt += 1
+            }
         }
     }
 
-    private static func chatTurn(_ request: URLRequest, onDelta: @MainActor (String) -> Void) async throws -> ChatStream {
+    private static func chatTurn(
+        _ request: URLRequest, onDelta: @MainActor (String) -> Void,
+        onReasoning: @MainActor (String) -> Void
+    ) async throws -> ChatStream {
         let (bytes, response) = try await open(request)
         defer { bytes.task.cancel() }
         guard response.expectedContentLength <= textLimit else { throw ReaderAIError.oversizedResponse }
         if response.value(forHTTPHeaderField: "Content-Type")?.lowercased().contains("text/event-stream") == true {
-            return try await readStream(bytes, request: request, onDelta: onDelta)
+            return try await readStream(bytes, request: request, onDelta: onDelta, onReasoning: onReasoning)
         }
 
         let payload = try await readBytes(bytes, limit: textLimit)
         var result = ChatStream()
         if let object = object(payload) {
-            if let delta = try result.consume(object, redacting: request) { await onDelta(delta) }
+            let delta = try result.consume(object, redacting: request)
+            if !result.reasoning.isEmpty { await onReasoning(result.visibleReasoning(for: request)) }
+            if let delta { await onDelta(delta) }
         } else if let content = String(data: payload, encoding: .utf8) {
             // Some compatible gateways respond with an event stream labelled as JSON or text.
             for line in content.components(separatedBy: "\n") {
-                if let delta = try result.line(line, redacting: request) { await onDelta(delta) }
+                try await consumeLine(line, in: &result, request: request, onDelta: onDelta, onReasoning: onReasoning)
             }
-            if let delta = try result.line("", redacting: request) { await onDelta(delta) }
+            try await consumeLine("", in: &result, request: request, onDelta: onDelta, onReasoning: onReasoning)
         }
         return result
     }
@@ -174,11 +205,19 @@ enum ReaderAIClient {
     static func generateImage(
         prompt: String, provider: ReaderAIImageProvider, singleImage: Bool = false
     ) async throws -> Data {
+        let effectivePrompt = [provider.stylePrompt.aiTrimmed, prompt.aiTrimmed].filter { !$0.isEmpty }.joined(separator: "\n\n")
+        guard !effectivePrompt.isEmpty else { throw ReaderAIError.emptyResponse }
+        let timeout = TimeInterval(max(60_000, min(600_000, provider.timeoutMilliseconds))) / 1_000
+        if provider.kind == .script {
+            let runner = await ReaderAIImageScript(provider: provider, timeout: timeout)
+            let data = try await runner.run(prompt: effectivePrompt)
+            let result = try JSONSerialization.jsonObject(with: data, options: .fragmentsAllowed)
+            guard let source = imageSource(in: result) else { throw ReaderAIError.emptyResponse }
+            return try await readImage(source, provider: provider, timeout: timeout)
+        }
         let params = try provider.parameters()
         let usesResponses = provider.usesResponses(parameters: params)
         let model = provider.resolvedModel(parameters: params)
-        let effectivePrompt = [provider.stylePrompt.aiTrimmed, prompt.aiTrimmed].filter { !$0.isEmpty }.joined(separator: "\n\n")
-        guard !effectivePrompt.isEmpty else { throw ReaderAIError.emptyResponse }
 
         let route: String
         let body: [String: Any]
@@ -205,7 +244,6 @@ enum ReaderAIClient {
             body = payload
         }
 
-        let timeout = TimeInterval(max(60_000, min(600_000, provider.timeoutMilliseconds))) / 1_000
         let request = try request(
             address: provider.address, route: route, key: provider.key, headers: provider.headers,
             timeout: timeout, body: body
@@ -215,20 +253,28 @@ enum ReaderAIClient {
             if let error = serviceError(in: result as? [String: Any] ?? [:], request: request) {
                 throw ReaderAIError.provider(error)
             }
-            if let source = imageSource(in: result) {
-                switch source {
-                case .data(let image): return image
-                case .url(let url):
-                    var download = URLRequest(url: url, timeoutInterval: timeout)
-                    download.setValue("image/*", forHTTPHeaderField: "Accept")
-                    let image = try await read(download, limit: imageLimit, forMedia: true)
-                    guard isImage(image) else { throw ReaderAIError.emptyResponse }
-                    return image
-                }
-            }
+            if let source = imageSource(in: result) { return try await readImage(source, provider: provider, timeout: timeout) }
         }
         if payload.count <= imageLimit, isImage(payload) { return payload }
         throw ReaderAIError.emptyResponse
+    }
+
+    private static func readImage(_ source: ImageSource, provider: ReaderAIImageProvider, timeout: TimeInterval) async throws -> Data {
+        switch source {
+        case .data(let image): return image
+        case .url(let url):
+            var download = URLRequest(url: url, timeoutInterval: timeout)
+            download.setValue("image/*", forHTTPHeaderField: "Accept")
+            if let endpoint = URL(string: provider.address.aiTrimmed), ReaderAIEndpoint.sameOrigin(endpoint, url) {
+                for (name, value) in try ReaderAIHeaders.parse(provider.headers)
+                    where !["host", "content-length", "transfer-encoding", "connection"].contains(name) {
+                    download.setValue(value, forHTTPHeaderField: name)
+                }
+            }
+            let image = try await read(download, limit: imageLimit, forMedia: true)
+            guard isImage(image) else { throw ReaderAIError.emptyResponse }
+            return image
+        }
     }
 
     private static func request(
@@ -303,7 +349,8 @@ enum ReaderAIClient {
     }
 
     private static func readStream(
-        _ bytes: URLSession.AsyncBytes, request: URLRequest, onDelta: @MainActor (String) -> Void
+        _ bytes: URLSession.AsyncBytes, request: URLRequest, onDelta: @MainActor (String) -> Void,
+        onReasoning: @MainActor (String) -> Void
     ) async throws -> ChatStream {
         var stream = ChatStream()
         var line = [UInt8]()
@@ -312,23 +359,34 @@ enum ReaderAIClient {
             count += 1
             guard count <= textLimit else { throw ReaderAIError.oversizedResponse }
             if byte == 10 {
-                if let delta = try stream.line(String(decoding: line, as: UTF8.self), redacting: request) {
-                    await onDelta(delta)
-                }
+                try await consumeLine(String(decoding: line, as: UTF8.self), in: &stream,
+                                      request: request, onDelta: onDelta, onReasoning: onReasoning)
                 if stream.finished { return stream }
                 line.removeAll(keepingCapacity: true)
             } else {
                 line.append(byte)
             }
         }
-        if let delta = try stream.line(String(decoding: line, as: UTF8.self), redacting: request) { await onDelta(delta) }
-        if let delta = try stream.line("", redacting: request) { await onDelta(delta) }
+        try await consumeLine(String(decoding: line, as: UTF8.self), in: &stream,
+                              request: request, onDelta: onDelta, onReasoning: onReasoning)
+        try await consumeLine("", in: &stream, request: request, onDelta: onDelta, onReasoning: onReasoning)
         return stream
+    }
+
+    private static func consumeLine(
+        _ line: String, in stream: inout ChatStream, request: URLRequest,
+        onDelta: @MainActor (String) -> Void, onReasoning: @MainActor (String) -> Void
+    ) async throws {
+        let previous = stream.reasoningVersion
+        let delta = try stream.line(line, redacting: request)
+        if stream.reasoningVersion != previous { await onReasoning(stream.visibleReasoning(for: request)) }
+        if let delta { await onDelta(delta) }
     }
 
     private struct ChatStream {
         private(set) var text = ""
         private(set) var reasoning = ""
+        private(set) var reasoningVersion = 0
         private var pending = ""
         private var calls: [Int: ReaderAISkillTool.Call] = [:]
         private var indexedOutput: [Int: String] = [:]
@@ -400,10 +458,17 @@ enum ReaderAIClient {
                 if let fragment { indexedOutput[outputIndex, default: ""].append(fragment) }
             case "response.output_text.done":
                 fragment = completeOutputText(event["text"] as? String, at: outputIndex)
+            case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+                if let delta = event["delta"] as? String { appendReasoning(delta) }
+                return nil
             case "response.output_item.added", "response.output_item.done":
                 let item = event["item"] as? [String: Any] ?? [:]
                 if event["type"] as? String == "response.output_item.done", !item.isEmpty {
                     completedItems[outputIndex] = item
+                    if reasoning.isEmpty, item["type"] as? String == "reasoning",
+                       let summary = contentText(item["summary"] ?? item["content"]) {
+                        appendReasoning(summary)
+                    }
                 }
                 captureResponseCall(item, at: outputIndex)
                 fragment = completeOutputText(responseItemText(item), at: outputIndex)
@@ -418,6 +483,7 @@ enum ReaderAIClient {
                 finished = true
                 let result = event["response"] as? [String: Any] ?? event
                 captureResponseCalls(result)
+                captureCompletedReasoning(result)
                 fragment = suffix(of: responseText(result), after: text)
             case "response.failed", "error":
                 let message = serviceError(in: event, request: request, allowTopLevelMessage: true)
@@ -426,20 +492,48 @@ enum ReaderAIClient {
                 let choice = (event["choices"] as? [[String: Any]])?.first
                 let delta = choice?["delta"] as? [String: Any]
                 let message = choice?["message"] as? [String: Any]
-                if let fullReasoning = message?["reasoning_content"] as? String, !fullReasoning.isEmpty {
-                    reasoning = fullReasoning
-                } else if let part = delta?["reasoning_content"] as? String {
-                    reasoning.append(part)
+                if let fullReasoning = chatReasoning(message), !fullReasoning.isEmpty {
+                    if reasoning != fullReasoning {
+                        reasoning = fullReasoning
+                        reasoningVersion += 1
+                    }
+                } else if let part = chatReasoning(delta) {
+                    appendReasoning(part)
                 }
                 captureChatCalls(delta, incremental: true)
                 captureChatCalls(message, incremental: false)
                 captureResponseCalls(event)
+                captureCompletedReasoning(event)
                 let full = contentText(message?["content"]) ?? responseText(event) ?? event["response"] as? String
                 fragment = contentText(delta?["content"]) ?? choice?["text"] as? String ?? suffix(of: full, after: text)
             }
             guard let fragment, !fragment.isEmpty else { return nil }
             text.append(fragment)
             return fragment
+        }
+
+        func visibleReasoning(for request: URLRequest) -> String {
+            String(redactingHeaderValues(in: String(reasoning.prefix(8_200)), from: request).prefix(8_000))
+        }
+
+        private func chatReasoning(_ message: [String: Any]?) -> String? {
+            contentText(message?["reasoning_content"])
+                ?? contentText(message?["reasoning"])
+                ?? contentText(message?["thinking"])
+        }
+
+        private mutating func appendReasoning(_ fragment: String) {
+            guard !fragment.isEmpty else { return }
+            reasoning.append(fragment)
+            reasoningVersion += 1
+        }
+
+        private mutating func captureCompletedReasoning(_ event: [String: Any]) {
+            guard reasoning.isEmpty else { return }
+            let items = event["output"] as? [[String: Any]] ?? []
+            let summaries = items.filter { $0["type"] as? String == "reasoning" }
+                .compactMap { contentText($0["summary"] ?? $0["content"]) }
+            appendReasoning(summaries.joined(separator: "\n"))
         }
 
         private mutating func completeOutputText(_ value: String?, at index: Int) -> String? {
@@ -574,9 +668,15 @@ enum ReaderAIClient {
     ) -> String? {
         let error = body["error"]
         let nestedMessage = (error as? [String: Any])?["message"] as? String
-        guard var message = nestedMessage ?? error as? String ?? (allowTopLevelMessage ? body["message"] as? String : nil) else {
+        guard let message = nestedMessage ?? error as? String ?? (allowTopLevelMessage ? body["message"] as? String : nil) else {
             return nil
         }
+        let safeMessage = String(redactingHeaderValues(in: message, from: request).aiTrimmed.prefix(480))
+        return safeMessage.isEmpty ? nil : safeMessage
+    }
+
+    private static func redactingHeaderValues(in value: String, from request: URLRequest) -> String {
+        var message = value
         let visibleHeaders: Set<String> = ["accept", "content-type"]
         for (name, value) in request.allHTTPHeaderFields ?? [:] where !visibleHeaders.contains(name.lowercased()) {
             if !value.isEmpty { message = message.replacingOccurrences(of: value, with: "••••") }
@@ -585,8 +685,7 @@ enum ReaderAIClient {
                 if !token.isEmpty { message = message.replacingOccurrences(of: token, with: "••••") }
             }
         }
-        message = String(message.aiTrimmed.prefix(480))
-        return message.isEmpty ? nil : message
+        return message
     }
 
     private static func session(forMedia: Bool) -> URLSession {

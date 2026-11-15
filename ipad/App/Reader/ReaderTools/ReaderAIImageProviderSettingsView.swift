@@ -141,21 +141,25 @@ private struct ReaderAIImageProviderEditor: View {
         NavigationStack {
             Form {
                 Section("提供商") {
-                    LabeledContent("类型", value: "OpenAI 兼容")
+                    Picker("类型", selection: $draft.kind) {
+                        ForEach(ReaderAIImageProvider.Kind.allCases) { kind in Text(kind.title).tag(kind) }
+                    }
                     Toggle("启用提供商", isOn: $draft.enabled)
                 }
                 ReaderAISettingsConnectionFields(name: $draft.name, address: $draft.address, key: $draft.key)
-                Section {
-                    Picker("接口格式", selection: imageAPI) {
-                        Text("Images API").tag(ImageAPI.images)
-                        Text("Responses").tag(ImageAPI.responses)
+                if draft.kind == .openAI {
+                    Section("调用接口") {
+                        Picker("接口格式", selection: imageAPI) {
+                            Text("Images API").tag(ImageAPI.images)
+                            Text("Responses").tag(ImageAPI.responses)
+                        }
                     }
-                } header: {
-                    Text("调用接口")
+                    modelSection
+                } else {
+                    scriptSection
                 }
-                modelSection
                 Section("请求配置") {
-                    if let parameters = try? draft.parameters() {
+                    if draft.kind == .openAI, let parameters = try? draft.parameters() {
                         ReaderAIEndpointPreview(
                             address: draft.address,
                             route: draft.usesResponses(parameters: parameters) ? "responses" : "images/generations"
@@ -175,7 +179,7 @@ private struct ReaderAIImageProviderEditor: View {
                 } header: {
                     Text("默认参数")
                 } footer: {
-                    Text("例如 { \"size\": \"1024x1024\" }。参数按所选接口发送。")
+                    Text(draft.kind == .script ? "脚本可通过 provider.parameters 读取这些参数。" : "例如 { \"size\": \"1024x1024\" }。参数按所选接口发送。")
                 }
                 Section("风格提示词") {
                     TextField("附加到每次生图提示词", text: $draft.stylePrompt, axis: .vertical)
@@ -190,8 +194,8 @@ private struct ReaderAIImageProviderEditor: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("保存", action: saveDraft)
-                        .disabled(draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                  || draft.address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(draft.name.aiTrimmed.isEmpty || (draft.kind == .script
+                            ? (draft.script ?? "").aiTrimmed.isEmpty : draft.address.aiTrimmed.isEmpty))
                 }
             }
             .readerAISettingsError($errorMessage)
@@ -212,6 +216,30 @@ private struct ReaderAIImageProviderEditor: View {
     private var usesResponses: Bool { imageAPI.wrappedValue == .responses }
     private var requestModel: String { draft.resolvedModel(parameters: (try? draft.parameters()) ?? [:]) }
     private var toolModel: String? { draft.resolvedImageToolModel(parameters: (try? draft.parameters()) ?? [:]) }
+
+    private var scriptSection: some View {
+        Section {
+            TextField("模型名称（选填）", text: $draft.model)
+            TextField("async function generate(prompt, provider) { … }", text: scriptBinding(\.script), axis: .vertical)
+                .font(.system(.body, design: .monospaced))
+                .lineLimit(5...15)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            TextField("共用 JS（选填）", text: scriptBinding(\.scriptLibrary), axis: .vertical)
+                .font(.system(.body, design: .monospaced))
+                .lineLimit(2...8)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+        } header: {
+            Text("生图脚本")
+        } footer: {
+            Text("返回图片 URL、Base64 或 JSON。接口请求可用 await java.ajax 或 await java.post。")
+        }
+    }
+
+    private func scriptBinding(_ field: WritableKeyPath<ReaderAIImageProvider, String?>) -> Binding<String> {
+        Binding { draft[keyPath: field] ?? "" } set: { draft[keyPath: field] = $0 }
+    }
 
     private var modelSection: some View {
         Section {

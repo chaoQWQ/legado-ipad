@@ -72,6 +72,17 @@ struct ReaderAISettingsView: View {
                 }
                 Toggle("回车发送", isOn: presentation.binding(\.returnToSend))
                 Toggle("显示思考工具栏", isOn: presentation.binding(\.showsThinkingToolbar))
+                Toggle("上下文压缩", isOn: presentation.binding(\.contextCompressionEnabled))
+                if settings.contextCompressionEnabled {
+                    LabeledContent("上下文上限") {
+                        TextField("Token 数", value: presentation.binding(\.contextWindowTokens), format: .number.grouping(.never))
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing)
+                            .monospacedDigit()
+                    }
+                }
+                NavigationLink("世界书管理") { ReaderAIWorldBookSettingsView() }
+                NavigationLink("AI 长期记忆") { ReaderAIMemorySettingsView() }
             } footer: {
                 if let installedSkillName {
                     Text("已安装「\(installedSkillName)」。")

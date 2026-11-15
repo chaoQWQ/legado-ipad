@@ -14,6 +14,8 @@ struct LibraryBook: Codable, Identifiable {
     let title: String
     let author: String
     let coverURL: URL?
+    let introduction: String?
+    let tocURL: URL?
     let sourceID: String?
     let onlineID: String?
     let chapters: [Chapter]
@@ -161,6 +163,8 @@ final class LibraryStore: ObservableObject {
             title: imported.title,
             author: imported.author ?? "",
             coverURL: nil,
+            introduction: nil,
+            tocURL: nil,
             sourceID: nil,
             onlineID: nil,
             chapters: imported.chapters.map { .init(title: $0.title, online: nil) },
@@ -193,6 +197,8 @@ final class LibraryStore: ObservableObject {
             title: result.title,
             author: result.author,
             coverURL: result.coverURL,
+            introduction: result.introduction,
+            tocURL: result.tocURL,
             sourceID: result.sourceID,
             onlineID: result.id,
             chapters: chapters.map { .init(title: $0.title, online: $0) },
@@ -336,6 +342,8 @@ final class LibraryStore: ObservableObject {
             title: details.title,
             author: details.author.isEmpty ? book.author : details.author,
             coverURL: details.coverURL,
+            introduction: details.introduction,
+            tocURL: details.tocURL,
             sourceID: details.sourceID,
             onlineID: details.id,
             chapters: chapters.map { .init(title: $0.title, online: $0) },

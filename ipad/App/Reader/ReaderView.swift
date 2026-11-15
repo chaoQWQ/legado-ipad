@@ -51,6 +51,7 @@ struct ReaderView: View {
     @State private var attempt = 0
     @State private var refreshRequest: RefreshRequest?
     @State private var refreshError: String?
+    @State private var aiError: String?
     @State private var activeSheet: Sheet?
     @State private var selectedTextForTool = ""
     @State private var readerAISkillIDs: Set<String> = []
@@ -256,6 +257,14 @@ struct ReaderView: View {
                 Button("好", role: .cancel) {}
             } message: {
                 Text(refreshError ?? "")
+            }
+            .alert("阅读 AI", isPresented: Binding(
+                get: { aiError != nil },
+                set: { if !$0 { aiError = nil } }
+            )) {
+                Button("好", role: .cancel) {}
+            } message: {
+                Text(aiError ?? "")
             }
     }
 
@@ -938,6 +947,7 @@ struct ReaderView: View {
     ) {
         switch action {
         case .askAI:
+            guard checkAIConfiguration(forImage: false) else { return }
             let position = ReaderAskAIReadingContext(
                 chapterIndex: content.index, chapterCount: chapters.count, offset: location, chapterLength: content.textLength
             )
@@ -954,8 +964,10 @@ struct ReaderView: View {
             }
             present(.askAI)
         case .generateImage:
+            guard checkAIConfiguration(forImage: true) else { return }
             guard let paragraph = ReaderReadCoverage.paragraph(in: content.text, at: location),
                   let visible = ReaderReadCoverage.paragraph(in: content.transform.text, at: displayLocation) else {
+                aiError = "请选中一段正文。"
                 return
             }
             let paragraphText = ReaderContextText.excerpt(
@@ -970,6 +982,32 @@ struct ReaderView: View {
             present(.generateImage)
         default:
             break
+        }
+    }
+
+    private func checkAIConfiguration(forImage: Bool) -> Bool {
+        do {
+            let settings = try ReaderAISettings.load()
+            if forImage {
+                guard settings.defaultImageProvider != nil else {
+                    aiError = "请先在 AI 设置里配置生图供应商。"
+                    return false
+                }
+            } else {
+                guard settings.enabled else {
+                    aiError = "请先在 AI 设置中启用 AI。"
+                    return false
+                }
+                guard let provider = settings.defaultQuestionChoice?.provider,
+                      (try? ReaderAIEndpoint.make(provider.address, route: provider.apiMode.route)) != nil else {
+                    aiError = "请先在 AI 设置里配置问 AI 模型。"
+                    return false
+                }
+            }
+            return true
+        } catch {
+            aiError = error.localizedDescription
+            return false
         }
     }
 

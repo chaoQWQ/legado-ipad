@@ -16,7 +16,7 @@ struct ReaderAskAIToolTraceView: View {
                         HStack(alignment: .top, spacing: 8) {
                             status(for: step.status)
                                 .frame(width: 18, height: 18)
-                            details(for: step)
+                            details(for: step, showsResult: true)
                         }
                         .accessibilityElement(children: .combine)
                     }
@@ -40,7 +40,9 @@ struct ReaderAskAIToolTraceView: View {
         }
     }
 
-    private func details(for step: ReaderAskAIToolTrace.Step, argumentLines: Int = 2) -> some View {
+    private func details(
+        for step: ReaderAskAIToolTrace.Step, argumentLines: Int = 2, showsResult: Bool = false
+    ) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(verbatim: step.name)
                 .font(.callout.weight(.semibold))
@@ -50,6 +52,16 @@ struct ReaderAskAIToolTraceView: View {
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
                     .lineLimit(argumentLines)
+            }
+            if showsResult, let result = step.resultPreview {
+                Text(verbatim: result)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if showsResult, let attempts = step.attempts, attempts > 1 {
+                Text(step.status == .running ? "正在进行第 \(attempts) 次尝试" : "共尝试 \(attempts) 次")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
