@@ -50,6 +50,7 @@ struct LibraryReadingSession: View {
             online: onlineActions(for: book),
             sourceID: book.sourceID,
             readingIdentity: book.readerIdentity,
+            bookURLForAI: ReaderAILibraryTools.bookURL(for: book),
             bookmarkKey: book.readerBookmarkKey
         )
     }

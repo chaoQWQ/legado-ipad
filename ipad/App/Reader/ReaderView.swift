@@ -14,6 +14,7 @@ struct ReaderView: View {
     let bookID: UUID
     let sourceID: String?
     let readingIdentity: String?
+    let bookURLForAI: String?
     let title: String
     let author: String
     let chapters: [ReaderChapter]
@@ -54,10 +55,8 @@ struct ReaderView: View {
     @State private var selectedTextForTool = ""
     @State private var readerAISkillIDs: Set<String> = []
     @State private var readerAIMCPIDs: Set<String> = []
-    @State private var manualReadingContext: ReaderAskAIReadingContext?
-    @State private var manualContextRequest: UUID?
+    @State private var askSession: ReaderAskAISession?
     @State private var selectedImageContext: ReaderImageContext?
-    @State private var selectedImageAnchor: RecapAnchor?
     @State private var revealedChapterArt: ReaderChapterArtKey?
     @State private var recapAnchor: RecapAnchor?
     @State private var saveTask: Task<Void, Never>?
@@ -77,11 +76,13 @@ struct ReaderView: View {
         online: ReaderOnlineActions? = nil,
         sourceID: String? = nil,
         readingIdentity: String? = nil,
+        bookURLForAI: String? = nil,
         bookmarkKey: String? = nil
     ) {
         self.bookID = bookID
         self.sourceID = sourceID
         self.readingIdentity = readingIdentity
+        self.bookURLForAI = bookURLForAI
         self.title = title
         self.author = author
         self.chapters = chapters
@@ -243,6 +244,7 @@ struct ReaderView: View {
                 displayEffects.stop()
                 automaticScroll = false
                 speech.stop()
+                askSession?.stop()
                 saveProgress()
                 ReaderReadCoverage.shared.flush(bookID: bookID)
                 chapterArt.leave(bookID)
@@ -350,19 +352,11 @@ struct ReaderView: View {
         case .webSearch:
             ReaderWebSearchSheet(query: selectedTextForTool)
         case .askAI:
-            ReaderAskAIPanel(
-                bookID: bookID, bookTitle: titleScript.convert(title), author: author,
-                sourceName: online?.sourceName, chapterTitle: chapterTitle, excerpt: selectedTextForTool,
-                readingContext: manualReadingContext,
-                selectedSkillIDs: $readerAISkillIDs, selectedMCPIDs: $readerAIMCPIDs
-            )
-        case .generateImage:
-            if let selectedImageContext, let anchor = selectedImageAnchor {
-                ReaderImageGenerationView(context: selectedImageContext, precedingReadText: {
-                    await recapExcerpts(for: anchor, maximumCount: 3, maximumLength: 2_400)
-                        .map(\.text).joined(separator: "\n\n")
-                })
+            if let askSession {
+                ReaderAskAIPanel(session: askSession, selectedSkillIDs: $readerAISkillIDs, selectedMCPIDs: $readerAIMCPIDs)
             }
+        case .generateImage:
+            if let selectedImageContext { ReaderImageGenerationView(context: selectedImageContext) }
         case .recap:
             if let anchor = recapAnchor {
                 ReaderRecapSheet(throughLabel: anchor.label, loadExcerpts: { await recapExcerpts(for: anchor) })
@@ -802,17 +796,15 @@ struct ReaderView: View {
     }
 
     @MainActor
-    private func recapExcerpts(
-        for anchor: RecapAnchor, maximumCount: Int = 8, maximumLength: Int = 6_000
-    ) async -> [ReaderRecapExcerpt] {
+    private func recapExcerpts(for anchor: RecapAnchor) async -> [ReaderRecapExcerpt] {
         let coverage = ReaderReadCoverage.shared
         let indexes = coverage.chapterIndexes(bookID: bookID, sourceID: coverageSource)
             .filter { $0 <= anchor.chapter.index && chapters.indices.contains($0) }
         var excerpts: [ReaderRecapExcerpt] = []
-        var remaining = maximumLength
+        var remaining = 6_000
 
         for index in indexes.reversed().prefix(24) {
-            guard !Task.isCancelled, remaining > 0, excerpts.count < maximumCount else { break }
+            guard !Task.isCancelled, remaining > 0, excerpts.count < 8 else { break }
             let text: String
             let fingerprint: ReaderReadCoverage.Fingerprint
             let end: Int
@@ -831,7 +823,7 @@ struct ReaderView: View {
                 bookID: bookID, sourceID: coverageSource, chapterIndex: index, fingerprint: fingerprint
             )
             for range in ranges.reversed() {
-                guard remaining > 0, excerpts.count < maximumCount else { break }
+                guard remaining > 0, excerpts.count < 8 else { break }
                 let upper = min(NSMaxRange(range), end)
                 guard upper > range.location else { continue }
                 let limit = min(remaining, 1_600)
@@ -944,32 +936,31 @@ struct ReaderView: View {
     private func openReadingAI(
         _ action: ReaderSelectionAction, excerpt: String, location: Int, displayLocation: Int, in content: ChapterContent
     ) {
-        finishAutomaticScroll()
-        guard let paragraph = ReaderReadCoverage.paragraph(in: content.text, at: location),
-              let visible = ReaderReadCoverage.paragraph(in: content.transform.text, at: displayLocation) else {
-            return
-        }
-        let paragraphText = ReaderContextText.excerpt(
-            in: content.transform.text, from: visible.location, to: min(NSMaxRange(visible), visible.location + 1_600)
-        )?.replacingOccurrences(of: "\u{FFFC}", with: "") ?? ""
-        let earlier = RecapAnchor(chapter: content, end: paragraph.location, label: chapterTitle)
         switch action {
         case .askAI:
-            let request = UUID()
-            manualContextRequest = request
-            Task { @MainActor in
-                let excerpts = await recapExcerpts(for: earlier, maximumCount: 3, maximumLength: 3_400)
-                guard manualContextRequest == request, self.content?.id == content.id, activeSheet == nil else { return }
-                selectedTextForTool = excerpt
-                manualReadingContext = ReaderAskAIReadingContext(
-                    chapterIndex: content.index, chapterCount: chapters.count, offset: location,
-                    chapterLength: content.textLength, paragraph: paragraphText, preceding: excerpts.map(\.text)
+            let position = ReaderAskAIReadingContext(
+                chapterIndex: content.index, chapterCount: chapters.count, offset: location, chapterLength: content.textLength
+            )
+            let context = ReaderAskAIContext(
+                bookTitle: titleScript.convert(title), author: author, sourceName: online?.sourceName,
+                chapterTitle: chapterTitle, excerpt: excerpt, bookID: bookID, bookURL: bookURLForAI, readingContext: position
+            )
+            if let askSession {
+                askSession.reopen(at: context)
+            } else {
+                askSession = ReaderAskAISession(
+                    bookID: bookID, context: context, initialSkillIDs: readerAISkillIDs, initialMCPIDs: readerAIMCPIDs
                 )
-                present(.askAI)
             }
+            present(.askAI)
         case .generateImage:
-            manualContextRequest = nil
-            selectedImageAnchor = earlier
+            guard let paragraph = ReaderReadCoverage.paragraph(in: content.text, at: location),
+                  let visible = ReaderReadCoverage.paragraph(in: content.transform.text, at: displayLocation) else {
+                return
+            }
+            let paragraphText = ReaderContextText.excerpt(
+                in: content.transform.text, from: visible.location, to: NSMaxRange(visible)
+            )?.replacingOccurrences(of: "\u{FFFC}", with: "") ?? ""
             selectedImageContext = ReaderImageContext(
                 bookID: bookID, bookTitle: titleScript.convert(title), author: author,
                 chapterIndex: content.index, chapterTitle: chapterTitle, sourceText: excerpt,

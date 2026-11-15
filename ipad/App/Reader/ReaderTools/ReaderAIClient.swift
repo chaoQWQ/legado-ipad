@@ -78,6 +78,18 @@ enum ReaderAIClient {
             let response: ChatStream
             do {
                 response = try await chatTurn(request, onDelta: onDelta)
+            } catch let error as ReaderAIError where round == 0 && mode == .chatCompletions
+                && !uniqueTools.isEmpty && error.requiresResponsesForTools {
+                // The provider rejected the request before running any tools.
+                // Keep the model and tool list, using its supported endpoint.
+                var compatibleProvider = provider
+                compatibleProvider.apiMode = .responses
+                let compatibleChoice = ReaderAIModelChoice(record: choice.record, provider: compatibleProvider)
+                return try await chat(
+                    messages: messages, using: compatibleChoice, skills: skills, tools: tools,
+                    toolRoundLimit: toolRoundLimit, allowsTextOnlyFallback: false,
+                    onProgress: onProgress, onDelta: onDelta
+                )
             } catch let error as ReaderAIError where round == 0 && allowsTextOnlyFallback
                 && skillTool.skills.isEmpty && !tools.isEmpty && error.meansToolsUnsupported {
                 return try await chat(messages: messages, using: choice, onProgress: onProgress, onDelta: onDelta)
@@ -104,8 +116,11 @@ enum ReaderAIClient {
             }
             for call in calls {
                 try Task.checkCancellation()
-                await onProgress(.calling(id: call.id, name: call.name))
-                let result = try await run(call, using: dispatched[call.name])
+                let tool = dispatched[call.name]
+                let previewArguments = tool != nil && ReaderAskAIToolTrace.acceptsArguments(for: call.name)
+                    ? call.arguments : nil
+                await onProgress(.calling(id: call.id, name: tool?.name ?? "未知工具", previewArguments: previewArguments))
+                let result = try await run(call, using: tool)
                 let status = object(Data(result.utf8))
                 let reportedFailure = (status?["ok"] as? Bool == false) || (status?["isError"] as? Bool == true)
                 await onProgress(.completed(id: call.id, succeeded: !reportedFailure))
@@ -608,6 +623,12 @@ enum ReaderAIClient {
 }
 
 private extension ReaderAIError {
+    var requiresResponsesForTools: Bool {
+        guard case .http(400, let message) = self, let message = message?.lowercased() else { return false }
+        return message.contains("function tools") && message.contains("not supported")
+            && message.contains("/v1/chat/completions") && message.contains("/v1/responses")
+    }
+
     var meansToolsUnsupported: Bool {
         guard case .http(let status, let message) = self, status == 400 || status == 422,
               let message = message?.lowercased() else { return false }

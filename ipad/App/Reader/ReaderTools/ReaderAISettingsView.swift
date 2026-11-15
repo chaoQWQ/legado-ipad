@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ReaderAISettingsView: View {
     @EnvironmentObject private var library: LibraryStore
@@ -6,6 +7,8 @@ struct ReaderAISettingsView: View {
     @State private var showsPrompt = false
     @State private var installsDefaultSkill = false
     @State private var installedSkillName: String?
+    @State private var importsCharacters = false
+    @State private var characterImportMessage: String?
     private let catalogID = UUID()
 
     var body: some View {
@@ -27,6 +30,7 @@ struct ReaderAISettingsView: View {
         .sheet(isPresented: $showsPrompt) {
             ReaderAIPromptEditor(presentation: presentation)
         }
+        .fileImporter(isPresented: $importsCharacters, allowedContentTypes: [.json], onCompletion: importCharacters)
         .readerAISettingsError($presentation.errorMessage)
     }
 
@@ -127,6 +131,13 @@ struct ReaderAISettingsView: View {
                 }
                 NavigationLink("图像图库") { ReaderImageGalleryView() }
             }
+            Section {
+                Button("导入安卓角色资料", systemImage: "square.and.arrow.down") {
+                    importsCharacters = true
+                }
+            } footer: {
+                Text(characterImportMessage ?? "选择安卓备份中的 bookCharacters.json。导入的角色资料可用于正文问 AI 和优化生图提示词。")
+            }
         }
     }
 
@@ -146,6 +157,32 @@ struct ReaderAISettingsView: View {
                 let skill = try await ReaderAISkill.fetchDefault()
                 try presentation.updateSkills { $0.installDefaultSkill(skill) }
                 installedSkillName = skill.name
+            } catch {
+                presentation.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func importCharacters(_ result: Result<URL, Error>) {
+        Task {
+            do {
+                let url = try result.get()
+                let books = library.books.map { book in
+                    ReaderBookCharacterStore.ImportBook(
+                        id: book.id, title: book.title, author: book.author,
+                        legacyBookURL: ReaderAILibraryTools.bookURL(for: book)
+                    )
+                }
+                let imported = try await ReaderBookCharacterStore.shared.importBackup(from: url, books: books)
+                let skipped = imported.unmatchedCount
+                if imported.characterCount == 0 {
+                    characterImportMessage = "没有可与当前书架匹配的角色资料。"
+                } else {
+                    let importedText = "已为 \(imported.bookCount) 本书导入 \(imported.characterCount) 条角色资料。"
+                    characterImportMessage = skipped == 0 ? importedText : importedText + "\(skipped) 条与当前书架未匹配。"
+                }
+            } catch where (error as? CocoaError)?.code == .userCancelled {
+                return
             } catch {
                 presentation.errorMessage = error.localizedDescription
             }

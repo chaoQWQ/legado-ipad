@@ -41,6 +41,6 @@ enum ReaderAIToolScope: String, CaseIterable, Identifiable, Codable {
 
 enum ReaderAIToolProgress {
     case thinking
-    case calling(id: String, name: String)
+    case calling(id: String, name: String, previewArguments: String?)
     case completed(id: String, succeeded: Bool)
 }

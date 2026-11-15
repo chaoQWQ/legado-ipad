@@ -4,12 +4,8 @@ import Foundation
 enum ReaderAINativeTools {
     private static let safeWorkspaceNames: Set<String> = [
         "workspace_list_files", "workspace_read_file", "workspace_read_lines", "workspace_read_matches",
-        "workspace_search_files", "workspace_list_backups", "workspace_diff_file", "workspace_debug_book_source"
-    ]
-
-    private static let fixtureToolNames: Set<String> = [
-        "get_book_source_help", "search_knowledge", "get_css_selector_rules", "get_book_source_templates",
-        "validate_book_source", "debug_book_source"
+        "workspace_search_files", "workspace_list_backups", "workspace_diff_file", "workspace_import_book_source",
+        "workspace_debug_book_source"
     ]
 
     static func catalog(
@@ -33,7 +29,6 @@ enum ReaderAINativeTools {
             switch scope {
             case .enabled: return !disabled.contains(tool.name)
             case .safe: return ReaderAILibraryTools.names.contains(tool.name) || safeWorkspaceNames.contains(tool.name)
-                    || fixtureToolNames.contains(tool.name)
             case .all: return true
             }
         }
@@ -41,6 +36,7 @@ enum ReaderAINativeTools {
 
     static func group(_ name: String) -> String {
         if name.hasPrefix("workspace_") { return "AI 工作区" }
+        if name == "list_book_characters" { return "角色资料" }
         if ReaderAILibraryTools.names.contains(name) { return "书架与正文" }
         if name == "search_web_tavily" { return "联网工具" }
         return "书源"

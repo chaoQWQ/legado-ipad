@@ -45,6 +45,7 @@ final class LibraryStore: ObservableObject {
     private struct SavedPosition: Codable, Equatable {
         let position: ReaderPosition
         let revision: UUID?
+        var lastReadAt: Date?
     }
 
     @Published private var catalog = Catalog()
@@ -126,6 +127,13 @@ final class LibraryStore: ObservableObject {
         storedPosition(for: id) != nil
     }
 
+    func lastReadAt(for id: UUID) -> Date? {
+        guard let book = currentBook(id), let saved = positions[id], saved.revision == book.readingRevision else {
+            return nil
+        }
+        return saved.lastReadAt
+    }
+
     private func storedPosition(for id: UUID) -> ReaderPosition? {
         guard let book = currentBook(id) else { return nil }
         if let saved = positions[id], saved.revision == book.readingRevision { return saved.position }
@@ -134,9 +142,9 @@ final class LibraryStore: ObservableObject {
 
     func savePosition(_ position: ReaderPosition, for id: UUID) {
         guard let book = currentBook(id) else { return }
-        let saved = SavedPosition(position: position, revision: book.readingRevision)
-        guard saved != positions[id] else { return }
-        positions[id] = saved
+        if let saved = positions[id], saved.position == position, saved.revision == book.readingRevision,
+           saved.lastReadAt != nil { return }
+        positions[id] = SavedPosition(position: position, revision: book.readingRevision, lastReadAt: .now)
         persistPositions()
     }
 
@@ -212,6 +220,7 @@ final class LibraryStore: ObservableObject {
         }
         defaults.removeObject(forKey: ReaderReplacementRule.storageKey(bookID: id))
         ReaderReadCoverage.shared.remove(bookID: id)
+        try? await ReaderBookCharacterStore.shared.remove(bookID: id)
         try? await ReaderChapterArt.shared.remove(bookID: id)
         await files.removeBook(id)
     }
@@ -219,6 +228,13 @@ final class LibraryStore: ObservableObject {
     func cachedChapter(in book: LibraryBook, at index: Int) async throws -> String? {
         let cached = try await readCachedChapter(in: book, at: index)
         return cached.map { chapterTextForReading($0, in: book) }
+    }
+
+    func cachedChapterIndexes(in book: LibraryBook) async throws -> Set<Int> {
+        try verifyCurrent(book)
+        let inventory = try await files.chapterStorage(for: book)
+        try verifyCurrent(book)
+        return Set(inventory.chapterBytes.keys)
     }
 
     func chapter(in book: LibraryBook, at index: Int) async throws -> String {

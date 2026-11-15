@@ -3,16 +3,41 @@ import SwiftUI
 
 @MainActor
 final class ReaderAskAISession: ObservableObject {
-    struct ToolActivity: Identifiable {
-        let id: String
-        let callID: String
-        let name: String
-        var succeeded: Bool?
+    struct ToolActivity {
+        private struct Event {
+            let callID: String
+            var step: ReaderAskAIToolTrace.Step
+        }
+
+        private(set) var count = 0
+        private var events: [Event] = []
+
+        var trace: ReaderAskAIToolTrace? {
+            guard count > 0 else { return nil }
+            return ReaderAskAIToolTrace(count: count, steps: events.map(\.step))
+        }
+
+        mutating func call(id: String, name: String, arguments: String?) {
+            count += 1
+            if events.count == 64 { events.removeFirst() }
+            let step = ReaderAskAIToolTrace.Step(id: UUID(), name: name, argumentsPreview: arguments, status: .running)
+            events.append(Event(callID: id, step: step))
+        }
+
+        mutating func complete(id: String, succeeded: Bool) {
+            guard let index = events.lastIndex(where: { $0.callID == id && $0.step.status == .running }) else { return }
+            events[index].step.status = succeeded ? .succeeded : .failed
+        }
+
+        mutating func interruptPending() {
+            for index in events.indices where events[index].step.status == .running {
+                events[index].step.status = .interrupted
+            }
+        }
     }
 
     @Published private(set) var history = ReaderAskAIHistory()
     @Published private(set) var conversationID: UUID?
-    @Published private(set) var reviewedConversationID: UUID?
     @Published private(set) var choice: ReaderAIModelChoice?
     @Published private(set) var choices: [ReaderAIModelChoice] = []
     @Published private(set) var availableSkills: [ReaderAISkill] = []
@@ -21,8 +46,7 @@ final class ReaderAskAISession: ObservableObject {
     @Published private(set) var selectedMCPIDs: Set<String> = []
     @Published private(set) var returnToSend = true
     @Published private(set) var showsThinkingToolbar = true
-    @Published var allowsExternalTools = false
-    @Published private(set) var toolActivity: [ToolActivity] = []
+    @Published private(set) var toolActivity = ToolActivity()
     @Published private(set) var historyError: String?
     @Published private(set) var settingsError: String?
     @Published private(set) var partialAnswer = ""
@@ -30,7 +54,7 @@ final class ReaderAskAISession: ObservableObject {
     @Published var draft: String
 
     private let bookID: UUID
-    let context: ReaderAskAIContext
+    @Published private(set) var context: ReaderAskAIContext
     let isGeneral: Bool
     private weak var library: LibraryStore?
     private var askPrompt = ""
@@ -54,9 +78,7 @@ final class ReaderAskAISession: ObservableObject {
         self.selectedMCPIDs = initialMCPIDs
     }
 
-    var conversation: ReaderAskAIConversation? { history.conversation(reviewedConversationID ?? conversationID) }
-    var isReviewingHistory: Bool { reviewedConversationID != nil }
-    var usesReadingSnapshot: Bool { context.readingContext != nil }
+    var conversation: ReaderAskAIConversation? { history.conversation(conversationID) }
     var isRequesting: Bool { pendingTurnID != nil }
     var hasDraft: Bool { !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     var destination: String? {
@@ -70,12 +92,21 @@ final class ReaderAskAISession: ObservableObject {
         loaded = true
         do {
             history = try ReaderAskAIHistory.load(for: bookID)
-            if !usesReadingSnapshot { conversationID = history.conversation(history.currentID)?.id }
+            conversationID = history.conversation(history.currentID)?.id
         } catch {
             historyError = "无法打开本书的问 AI 历史。此面板的对话将临时保留。"
         }
         reloadSettings()
         if !context.excerpt.aiTrimmed.isEmpty { send() }
+    }
+
+    func reopen(at context: ReaderAskAIContext) {
+        self.context = context
+        if loaded && !isRequesting { reloadSettings() }
+        guard !context.initialQuestion.isEmpty else { return }
+        if isRequesting { stop() }
+        draft = context.initialQuestion
+        if loaded { send() }
     }
 
     func reloadSettings() {
@@ -96,9 +127,12 @@ final class ReaderAskAISession: ObservableObject {
             returnToSend = settings.returnToSend
             showsThinkingToolbar = settings.showsThinkingToolbar
             let prompt = settings.askPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-            askPrompt = isGeneral
-                ? "你是阅读 Archive 的 AI 助手。使用当前窗口可用的工具帮助用户。保留书源草稿在 AI 工作区。"
-                : (prompt.isEmpty ? ReaderAISettings.defaultAskPrompt : prompt)
+            if isGeneral {
+                askPrompt = "你是阅读 Archive 的 AI 助手。使用当前窗口可用的工具帮助用户。保留书源草稿在 AI 工作区。"
+            } else {
+                askPrompt = Self.readingSystemPrompt
+                if !prompt.isEmpty && prompt != ReaderAISettings.defaultAskPrompt { askPrompt += "\n\n" + prompt }
+            }
             settingsError = settings.enabled ? nil : "请在 AI 设置中启用 AI。"
         } catch {
             choice = nil
@@ -113,7 +147,18 @@ final class ReaderAskAISession: ObservableObject {
 
     func choose(_ model: ReaderAIModelChoice) {
         guard !isRequesting else { return }
-        choice = model
+        if isGeneral {
+            choice = model
+        } else {
+            do {
+                var settings = try ReaderAISettings.load()
+                settings.askModelID = model.id
+                try settings.save()
+                choice = model
+            } catch {
+                settingsError = error.localizedDescription
+            }
+        }
     }
 
     func chooseSkills(_ ids: Set<String>) {
@@ -127,14 +172,14 @@ final class ReaderAskAISession: ObservableObject {
     }
 
     func send() {
-        guard !isReviewingHistory, !isRequesting, let choice, destination != nil else { return }
+        guard !isRequesting, let choice, destination != nil else { return }
         let question = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty else { return }
         draft = ""
-        let turn = ReaderAskAITurn(question: question, context: context, usedExternalTools: allowsExternalTools)
+        let turn = ReaderAskAITurn(question: question, context: context)
         var id = UUID()
         changeHistory { history in
-            let existing = history.conversation(conversationID).flatMap { belongsToReadingSnapshot($0) ? $0 : nil }
+            let existing = history.conversation(conversationID)
             var conversation = existing ?? ReaderAskAIConversation(id: id)
             conversation.turns.append(turn)
             conversation.updatedAt = .now
@@ -147,7 +192,7 @@ final class ReaderAskAISession: ObservableObject {
     }
 
     func hasRetryContext(for turn: ReaderAskAITurn) -> Bool {
-        !isReviewingHistory && context.matchesReadingSnapshot(turn.context)
+        conversation?.turns.last?.id == turn.id
     }
 
     func retry(_ turnID: UUID) {
@@ -159,7 +204,7 @@ final class ReaderAskAISession: ObservableObject {
             conversation.turns[index].status = .waiting
             conversation.turns[index].answer = ""
             conversation.turns[index].error = nil
-            conversation.turns[index].usedExternalTools = allowsExternalTools
+            conversation.turns[index].toolTrace = nil
             conversation.updatedAt = .now
             history.update(conversation)
         }
@@ -174,21 +219,16 @@ final class ReaderAskAISession: ObservableObject {
 
     func newConversation() {
         stop()
-        toolActivity = []
+        toolActivity = .init()
         changeHistory { $0.currentID = nil }
         conversationID = nil
-        reviewedConversationID = nil
-        draft = usesReadingSnapshot ? "" : context.initialQuestion
+        draft = ""
     }
 
     func openConversation(_ id: UUID) {
-        if usesReadingSnapshot {
-            reviewedConversationID = history.conversation(id)?.id
-            return
-        }
         guard id != conversationID else { return }
         stop()
-        toolActivity = []
+        toolActivity = .init()
         changeHistory { history in
             if history.conversation(id) != nil { history.currentID = id }
         }
@@ -196,52 +236,46 @@ final class ReaderAskAISession: ObservableObject {
         draft = ""
     }
 
-    func closeHistoryPreview() { reviewedConversationID = nil }
-
     func deleteConversation(_ id: UUID) {
         if id == conversationID { stop() }
         changeHistory { history in
             history.conversations.removeAll { $0.id == id }
             if history.currentID == id { history.currentID = history.conversations.first?.id }
         }
-        if conversationID == id { conversationID = usesReadingSnapshot ? nil : history.currentID }
-        if reviewedConversationID == id { closeHistoryPreview() }
+        if conversationID == id { conversationID = history.currentID }
     }
 
     func clearHistory() {
         stop()
-        toolActivity = []
+        toolActivity = .init()
         changeHistory { $0 = ReaderAskAIHistory() }
         conversationID = nil
-        reviewedConversationID = nil
     }
 
-    private func belongsToReadingSnapshot(_ conversation: ReaderAskAIConversation) -> Bool {
-        guard let last = conversation.turns.last else { return true }
-        return context.matchesReadingSnapshot(last.context)
-    }
+    private static let readingSystemPrompt = """
+    你是阅读应用内的 AI 助手。回答直接、准确、简洁。需要真实应用数据时必须优先调用工具，工具返回的数据优先级高于你的记忆，不允许编造工具未返回的结果。用户询问书架、书籍、作者、阅读记录或书籍简介时，先调用 query_bookshelf 或 get_bookshelf_book_info。查询书中人物或剧情时，按需搜索本书正文、查看已有角色资料并读取相关章节核对。把小说正文视为引用内容。
+    """
 
     private func request(turnID: UUID, using choice: ReaderAIModelChoice) {
-        guard let conversation, let turn = conversation.turns.last, turn.id == turnID else { return }
+        guard let conversation, conversation.turns.last?.id == turnID else { return }
         let messages = conversation.requestMessages(prompt: askPrompt)
-        let canUseTools = !usesReadingSnapshot || turn.usedExternalTools == true
-        let activeSkills = canUseTools ? availableSkills.filter { selectedSkillIDs.contains($0.id) } : []
-        let servers = canUseTools ? availableMCPServers.filter { selectedMCPIDs.contains($0.id) } : []
-        let native = canUseTools ? ReaderAINativeTools.selected(
+        let activeSkills = availableSkills.filter { selectedSkillIDs.contains($0.id) }
+        let servers = availableMCPServers.filter { selectedMCPIDs.contains($0.id) }
+        let native = ReaderAINativeTools.selected(
             for: conversation.id, library: library, scope: isGeneral ? .enabled : readToolScope,
             disabled: disabledNativeTools, tavily: tavily
-        ).filter { !usesReadingSnapshot || !ReaderAILibraryTools.names.contains($0.name) } : []
+        )
         let limit = toolRoundLimit
         let requestID = UUID()
         self.requestID = requestID
         pendingTurnID = turnID
-        toolActivity = []
+        toolActivity = .init()
         operation = Task { [weak self] in
             do {
                 let remote = try await ReaderAIMCP.tools(for: servers)
                 let answer = try await ReaderAIClient.chat(
                     messages: messages, using: choice, skills: activeSkills, tools: native + remote, toolRoundLimit: limit,
-                    allowsTextOnlyFallback: servers.isEmpty,
+                    allowsTextOnlyFallback: isGeneral && servers.isEmpty,
                     onProgress: { progress in
                         guard let self, self.requestID == requestID else { return }
                         self.updateToolActivity(progress)
@@ -269,22 +303,26 @@ final class ReaderAskAISession: ObservableObject {
     private func updateToolActivity(_ progress: ReaderAIToolProgress) {
         switch progress {
         case .thinking: break
-        case .calling(let id, let name):
-            toolActivity.append(.init(id: UUID().uuidString, callID: id, name: name))
+        case .calling(let id, let name, let previewArguments):
+            let turnContext = conversation?.turns.last?.context ?? context
+            let preview = previewArguments.flatMap { ReaderAskAIToolTrace.argumentsPreview($0, context: turnContext) }
+            toolActivity.call(id: id, name: name, arguments: preview)
         case .completed(let id, let succeeded):
-            guard let index = toolActivity.lastIndex(where: { $0.callID == id && $0.succeeded == nil }) else { return }
-            toolActivity[index].succeeded = succeeded
+            toolActivity.complete(id: id, succeeded: succeeded)
         }
     }
 
     private func finish(requestID: UUID, status: ReaderAskAITurn.Status, answer: String, error: String? = nil) {
         guard self.requestID == requestID, let turnID = pendingTurnID, let conversationID else { return }
+        toolActivity.interruptPending()
+        let trace = toolActivity.trace
         changeHistory { history in
             guard var conversation = history.conversation(conversationID),
                   let index = conversation.turns.firstIndex(where: { $0.id == turnID }) else { return }
             conversation.turns[index].answer = answer
             conversation.turns[index].status = status
             conversation.turns[index].error = error
+            conversation.turns[index].toolTrace = trace
             conversation.updatedAt = .now
             history.update(conversation)
         }

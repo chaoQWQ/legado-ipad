@@ -21,14 +21,24 @@ struct ReaderAskAIPanel: View {
     @FocusState private var composerFocused: Bool
 
     init(
+        session: ReaderAskAISession, selectedSkillIDs: Binding<Set<String>>, selectedMCPIDs: Binding<Set<String>>
+    ) {
+        _windowSkillIDs = selectedSkillIDs
+        _windowMCPIDs = selectedMCPIDs
+        _session = StateObject(wrappedValue: session)
+    }
+
+    init(
         bookID: UUID, bookTitle: String, author: String, sourceName: String?, chapterTitle: String, excerpt: String,
-        readingContext: ReaderAskAIReadingContext? = nil, selectedSkillIDs: Binding<Set<String>>,
+        bookURL: String? = nil, readingContext: ReaderAskAIReadingContext? = nil,
+        selectedSkillIDs: Binding<Set<String>>,
         selectedMCPIDs: Binding<Set<String>> = .constant([]),
         isGeneral: Bool = false
     ) {
         let context = ReaderAskAIContext(
             bookTitle: bookTitle, author: author, sourceName: sourceName,
-            chapterTitle: chapterTitle, excerpt: excerpt, bookID: isGeneral ? nil : bookID, readingContext: readingContext
+            chapterTitle: chapterTitle, excerpt: excerpt, bookID: isGeneral ? nil : bookID,
+            bookURL: bookURL, readingContext: readingContext
         )
         _windowSkillIDs = selectedSkillIDs
         _windowMCPIDs = selectedMCPIDs
@@ -45,21 +55,15 @@ struct ReaderAskAIPanel: View {
                 VStack(spacing: 0) {
                     if showsHistory {
                         historyList
-                        if session.isRequesting && !session.isReviewingHistory {
+                        if session.isRequesting {
                             Divider()
                             composer
                         }
-                    } else if session.isReviewingHistory {
-                        transcript
-                        Divider()
-                        Button("返回当前问答", systemImage: "arrow.uturn.backward", action: session.closeHistoryPreview)
-                            .padding()
                     } else {
                         contextBar
                         Divider()
                         transcript
                         Divider()
-                        if session.showsThinkingToolbar, !session.toolActivity.isEmpty { toolActivity }
                         composer
                     }
                 }
@@ -74,7 +78,7 @@ struct ReaderAskAIPanel: View {
                             .background(.regularMaterial)
                     }
                 }
-                .navigationTitle(showsHistory || session.isReviewingHistory ? historyTitle : (session.isGeneral ? "AI 助手" : "问 AI"))
+                .navigationTitle(showsHistory ? historyTitle : (session.isGeneral ? "AI 助手" : "问 AI"))
                 #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
                 #endif
@@ -84,7 +88,7 @@ struct ReaderAskAIPanel: View {
         .task { session.load(library: library) }
         .onChange(of: session.selectedSkillIDs) { _, ids in windowSkillIDs = ids }
         .onChange(of: session.selectedMCPIDs) { _, ids in windowMCPIDs = ids }
-        .onDisappear { session.stop() }
+        .onDisappear { if session.isGeneral { session.stop() } }
         .sheet(item: $activeSheet) { sheet in
             switch sheet {
             case .settings:
@@ -150,10 +154,6 @@ struct ReaderAskAIPanel: View {
                     composerFocused = false
                     showsHistory.toggle()
                 }
-                if session.usesReadingSnapshot {
-                    Toggle("本窗口允许联网与外部工具", isOn: $session.allowsExternalTools)
-                        .disabled(session.isRequesting)
-                }
                 Button("当前窗口 Skill（\(session.selectedSkillIDs.count)）", systemImage: "list.bullet.rectangle") {
                     composerFocused = false
                     session.reloadSettings()
@@ -213,7 +213,7 @@ struct ReaderAskAIPanel: View {
                 }
             }
             if let reading = session.context.readingContext {
-                Text("已读上下文 · \(reading.progressLabel)")
+                Text([session.context.chapterTitle, reading.progressLabel].filter { !$0.isEmpty }.joined(separator: " · "))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -278,6 +278,9 @@ struct ReaderAskAIPanel: View {
                 .onChange(of: session.partialAnswer) {
                     if followsLatest { proxy.scrollTo(ScrollTarget.latest, anchor: .bottom) }
                 }
+                .onChange(of: session.toolActivity.count) {
+                    if followsLatest && session.showsThinkingToolbar { proxy.scrollTo(ScrollTarget.latest, anchor: .bottom) }
+                }
             }
         } else {
             ContentUnavailableView("问问这段文字", systemImage: "text.bubble")
@@ -288,6 +291,7 @@ struct ReaderAskAIPanel: View {
     private func turnView(_ turn: ReaderAskAITurn, latest: Bool) -> some View {
         let pending = turn.id == session.pendingTurnID
         let answer = pending ? session.partialAnswer : turn.answer
+        let trace = pending ? session.toolActivity.trace : turn.toolTrace
         return VStack(spacing: 10) {
             bubble(isQuestion: true) {
                 Text(turn.question)
@@ -301,6 +305,9 @@ struct ReaderAskAIPanel: View {
                     }
                     .font(.footnote)
                 }
+            }
+            if session.showsThinkingToolbar, let trace {
+                ReaderAskAIToolTraceView(trace: trace)
             }
             bubble(isQuestion: false) {
                 if !answer.isEmpty {
@@ -385,8 +392,8 @@ struct ReaderAskAIPanel: View {
                             .disabled(!session.hasDraft)
                     }
                 }
-                Text(session.usesReadingSnapshot
-                     ? "对话、选文和已读上下文将发送至 \(destination)"
+                Text(session.context.readingContext != nil
+                     ? "对话、选文及调用工具取得的资料将发送至 \(destination)"
                      : "对话和选文将发送至 \(destination)")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -412,30 +419,6 @@ struct ReaderAskAIPanel: View {
         } else {
             TextField("问 AI", text: $session.draft, axis: .vertical).lineLimit(1...5)
         }
-    }
-
-    private var toolActivity: some View {
-        ScrollView(.horizontal) {
-            HStack(spacing: 8) {
-                ForEach(session.toolActivity.suffix(12)) { activity in
-                    Label {
-                        Text(activity.name).font(.caption.monospaced())
-                    } icon: {
-                        if let succeeded = activity.succeeded {
-                            Image(systemName: succeeded ? "checkmark.circle" : "exclamationmark.circle")
-                        } else {
-                            ProgressView().controlSize(.small)
-                        }
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                    .background(.quaternary, in: Capsule())
-                }
-            }
-            .padding(.horizontal, 20)
-        }
-        .padding(.vertical, 6)
-        .accessibilityLabel("工具调用过程")
     }
 
     private var historyList: some View {
