@@ -21,10 +21,12 @@ struct ReaderTextSelection {
 }
 
 #if os(iOS)
+import ImageIO
 import UIKit
 
 struct ReaderTextPane: UIViewRepresentable {
     let text: String
+    var images: [ReaderDisplayImage] = []
     let typography: ReaderTypography
     let initialOffset: Int
     let request: ReaderScrollRequest?
@@ -72,8 +74,9 @@ struct ReaderTextPane: UIViewRepresentable {
             mode: pageMode, animationDuration: pageAnimationDuration,
             interaction: interaction, columnWidth: columnWidth
         )
-        viewport.replace(text, typography: typography, at: initialOffset)
+        viewport.replace(text, typography: typography, at: initialOffset, images: images)
         context.coordinator.text = text
+        context.coordinator.images = images
         context.coordinator.typography = typography
         return viewport
     }
@@ -91,11 +94,12 @@ struct ReaderTextPane: UIViewRepresentable {
             mode: pageMode, animationDuration: pageAnimationDuration,
             interaction: interaction, columnWidth: columnWidth
         )
-        let textChanged = coordinator.text != text
+        let textChanged = coordinator.text != text || coordinator.images != images
         let typographyChanged = coordinator.typography != typography
         if textChanged || typographyChanged {
-            viewport.replace(text, typography: typography, at: textChanged ? initialOffset : view.anchorOffset)
+            viewport.replace(text, typography: typography, at: textChanged ? initialOffset : view.anchorOffset, images: images)
             coordinator.text = text
+            coordinator.images = images
             coordinator.typography = typography
         }
         if textChanged || typographyChanged || coordinator.highlight != highlight {
@@ -121,6 +125,7 @@ struct ReaderTextPane: UIViewRepresentable {
 
     final class Coordinator: NSObject, UITextViewDelegate {
         var text: String?
+        var images: [ReaderDisplayImage] = []
         var typography: ReaderTypography?
         var request: ReaderScrollRequest?
         var highlight: NSRange?
@@ -155,7 +160,8 @@ struct ReaderTextPane: UIViewRepresentable {
             guard range.location != NSNotFound, range.length > 0, NSMaxRange(range) <= body.length else {
                 return nil
             }
-            let passage = body.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
+            let passage = body.substring(with: range).replacingOccurrences(of: "\u{FFFC}", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !passage.isEmpty else { return nil }
             let selection = ReaderTextSelection(text: passage, range: range)
 
@@ -222,9 +228,10 @@ final class ReadingTextView: UITextView {
     private var highlight: NSRange?
     private var showsDiscretePages = false
     private var pageOriginY: CGFloat?
+    private var inlineAttachments: [NSTextAttachment] = []
     private var maximumScroll: CGFloat { max(0, contentSize.height - bounds.height) }
 
-    func replace(_ text: String, typography: ReaderTypography, at offset: Int) {
+    func replace(_ text: String, typography: ReaderTypography, at offset: Int, images: [ReaderDisplayImage] = []) {
         anchorOffset = offset
         pendingTarget = showsDiscretePages ? nil : .offset(offset)
         pageOriginY = nil
@@ -278,9 +285,45 @@ final class ReadingTextView: UITextView {
                 formatted.addAttribute(.paragraphStyle, value: indented, range: NSRange(enclosingRange, in: text))
             }
         }
+        insertAttachments(images, into: formatted, paragraph: paragraph)
         highlight = nil
         attributedText = formatted
         setNeedsLayout()
+    }
+
+    private func insertAttachments(
+        _ images: [ReaderDisplayImage], into text: NSMutableAttributedString, paragraph: NSParagraphStyle
+    ) {
+        inlineAttachments.removeAll()
+        guard !images.isEmpty else { return }
+        let centered = NSMutableParagraphStyle()
+        centered.setParagraphStyle(paragraph)
+        centered.alignment = .center
+        let options = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 1440
+        ] as CFDictionary
+        for placement in images where (0..<text.length).contains(placement.location) {
+            guard let source = CGImageSourceCreateWithURL(placement.url as CFURL, nil),
+                  let picture = CGImageSourceCreateThumbnailAtIndex(source, 0, options) else { continue }
+            let attachment = NSTextAttachment()
+            attachment.image = UIImage(cgImage: picture)
+            let range = NSRange(location: placement.location, length: 1)
+            text.addAttributes([.attachment: attachment, .paragraphStyle: centered], range: range)
+            inlineAttachments.append(attachment)
+        }
+        sizeAttachments(to: bounds.size)
+    }
+
+    private func sizeAttachments(to size: CGSize) {
+        let width = min(560, max(1, size.width - textContainerInset.left - textContainerInset.right) * 0.92)
+        let height = max(1, size.height - textContainerInset.top - textContainerInset.bottom) * 0.78
+        for attachment in inlineAttachments {
+            guard let image = attachment.image else { continue }
+            let scale = min(width / image.size.width, height / image.size.height)
+            attachment.bounds = CGRect(x: 0, y: 0, width: image.size.width * scale, height: image.size.height * scale)
+        }
     }
 
     private func fontWeight(for value: Double) -> UIFont.Weight {
@@ -364,6 +407,12 @@ final class ReadingTextView: UITextView {
 
     override func layoutSubviews() {
         let resized = lastLayoutSize != bounds.size
+        if resized && !inlineAttachments.isEmpty {
+            sizeAttachments(to: bounds.size)
+            layoutManager.invalidateLayout(
+                forCharacterRange: NSRange(location: 0, length: textStorage.length), actualCharacterRange: nil
+            )
+        }
         if !showsDiscretePages && resized && lastLayoutSize != .zero && pendingTarget == nil {
             pendingTarget = .offset(anchorOffset)
         }
@@ -481,6 +530,7 @@ final class ReadingTextView: UITextView {
 #else
 struct ReaderTextPane: View {
     let text: String
+    var images: [ReaderDisplayImage] = []
     let typography: ReaderTypography
     let initialOffset: Int
     let request: ReaderScrollRequest?

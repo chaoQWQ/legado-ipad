@@ -99,10 +99,10 @@ final class ReaderPagingViewport: UIView, UIGestureRecognizerDelegate {
         setNeedsLayout()
     }
 
-    func replace(_ text: String, typography: ReaderTypography, at offset: Int) {
+    func replace(_ text: String, typography: ReaderTypography, at offset: Int, images: [ReaderDisplayImage] = []) {
         cancelAnimation()
         pageColor = UIColor(typography.palette.background)
-        textView.replace(text, typography: typography, at: offset)
+        textView.replace(text, typography: typography, at: offset, images: images)
         pages = nil
         currentPage = nil
         setNeedsLayout()

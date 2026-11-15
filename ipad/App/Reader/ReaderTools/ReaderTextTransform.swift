@@ -19,8 +19,19 @@ struct ReaderReplacementRule: Codable, Equatable, Identifiable {
     }
 }
 
+struct ReaderInlineImage: Equatable {
+    let originalOffset: Int
+    let url: URL
+}
+
+struct ReaderDisplayImage: Equatable {
+    let location: Int
+    let url: URL
+}
+
 struct ReaderTextTransform {
     let text: String
+    let images: [ReaderDisplayImage]
 
     private struct Edit {
         let source: NSRange
@@ -29,8 +40,11 @@ struct ReaderTextTransform {
 
     private let originalLength: Int
     private let steps: [[Edit]]
+    private let imageEdits: [Edit]
 
-    init(original: String, rules: [ReaderReplacementRule], script: ReaderScript = .off) {
+    init(
+        original: String, rules: [ReaderReplacementRule], script: ReaderScript = .off, images: [ReaderInlineImage] = []
+    ) {
         let length = original.utf16.count
         var display = script.convert(original)
         var stages: [[Edit]] = []
@@ -76,9 +90,57 @@ struct ReaderTextTransform {
             stages.append(edits)
         }
 
-        text = display
+        let decorations = Self.insertImages(images, into: display, originalLength: length, through: stages)
+        text = decorations.text
+        self.images = decorations.images
         originalLength = length
         steps = stages
+        imageEdits = decorations.edits
+    }
+
+    private static func insertImages(
+        _ images: [ReaderInlineImage], into text: String, originalLength: Int, through stages: [[Edit]]
+    ) -> (text: String, images: [ReaderDisplayImage], edits: [Edit]) {
+        guard !images.isEmpty else { return (text, [], []) }
+        let source = text as NSString
+        let placements = images
+            .filter { (0...originalLength).contains($0.originalOffset) }
+            .map { image in
+                let mapped = stages.reduce(image.originalOffset) { offset, edits in
+                    map(offset, through: edits, from: \.source, to: \.destination)
+                }
+                let location = min(max(0, mapped), source.length)
+                guard location < source.length else { return (location: location, url: image.url) }
+                let character = source.rangeOfComposedCharacterSequence(at: location)
+                return (location: character.location == location ? location : NSMaxRange(character), url: image.url)
+            }
+            .sorted { $0.location < $1.location }
+        var cursor = 0
+        var delta = 0
+        var chunks: [String] = []
+        var attachments: [ReaderDisplayImage] = []
+        var edits: [Edit] = []
+        for placement in placements {
+            let location = placement.location
+            if location > cursor {
+                chunks.append(source.substring(with: NSRange(location: cursor, length: location - cursor)))
+            }
+            let followsLineBreak = location == 0 || cursor == location && !edits.isEmpty
+                || UnicodeScalar(source.character(at: location - 1)).map(CharacterSet.newlines.contains) == true
+            let prefix = followsLineBreak ? 0 : 1
+            let added = followsLineBreak ? "\u{FFFC}\n" : "\n\u{FFFC}\n"
+            let addedLength = 2 + prefix
+            attachments.append(ReaderDisplayImage(location: location + delta + prefix, url: placement.url))
+            edits.append(Edit(
+                source: NSRange(location: location, length: 0),
+                destination: NSRange(location: location + delta, length: addedLength)
+            ))
+            chunks.append(added)
+            cursor = location
+            delta += addedLength
+        }
+        chunks.append(source.substring(from: cursor))
+        return (chunks.joined(), attachments, edits)
     }
 
     private static func scriptEdits(from original: String, to display: String) -> [Edit] {
@@ -121,19 +183,24 @@ struct ReaderTextTransform {
         return edits
     }
 
-    func displayOffset(forOriginal offset: Int) -> Int {
-        steps.reduce(min(max(0, offset), originalLength)) { offset, edits in
-            map(offset, through: edits, from: \.source, to: \.destination)
+    func displayOffset(forOriginal offset: Int, beforeInlineImages: Bool = false) -> Int {
+        let base = steps.reduce(min(max(0, offset), originalLength)) { offset, edits in
+            Self.map(offset, through: edits, from: \.source, to: \.destination)
         }
+        if beforeInlineImages, let image = imageEdits.first(where: { $0.source.location == base }) {
+            return image.destination.location
+        }
+        return Self.map(base, through: imageEdits, from: \.source, to: \.destination)
     }
 
     func originalOffset(forDisplay offset: Int) -> Int {
-        steps.reversed().reduce(min(max(0, offset), text.utf16.count)) { offset, edits in
-            map(offset, through: edits, from: \.destination, to: \.source)
+        let base = Self.map(min(max(0, offset), text.utf16.count), through: imageEdits, from: \.destination, to: \.source)
+        return steps.reversed().reduce(base) { offset, edits in
+            Self.map(offset, through: edits, from: \.destination, to: \.source)
         }
     }
 
-    private func map(
+    private static func map(
         _ offset: Int,
         through edits: [Edit],
         from source: KeyPath<Edit, NSRange>,

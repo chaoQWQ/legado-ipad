@@ -46,6 +46,7 @@ struct LibraryReadingSession: View {
             onProgress: { library.savePosition($0, for: book) },
             cachedChapter: { index in try await library.cachedChapter(in: book, at: index) },
             online: onlineActions(for: book),
+            sourceID: book.sourceID,
             bookmarkKey: book.readerBookmarkKey
         )
     }

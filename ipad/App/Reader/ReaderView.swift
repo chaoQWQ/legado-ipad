@@ -10,6 +10,8 @@ struct ReaderPosition: Codable, Equatable {
 }
 
 struct ReaderView: View {
+    let bookID: UUID
+    let sourceID: String?
     let title: String
     let author: String
     let chapters: [ReaderChapter]
@@ -33,6 +35,7 @@ struct ReaderView: View {
 
     @StateObject private var speech = ReaderSpeechController()
     @StateObject private var displayEffects = ReaderDisplayEffects()
+    @ObservedObject private var imageGallery = ReaderImageGalleryStore.shared
     @State private var chapterIndex: Int
     @State private var offset: Int
     @State private var content: ChapterContent?
@@ -46,6 +49,7 @@ struct ReaderView: View {
     @State private var refreshError: String?
     @State private var activeSheet: Sheet?
     @State private var selectedTextForTool = ""
+    @State private var selectedImageContext: ReaderImageContext?
     @State private var saveTask: Task<Void, Never>?
     @State private var savedPosition: ReaderPosition?
     @State private var chapterPreview: Int?
@@ -61,8 +65,11 @@ struct ReaderView: View {
         onProgress: @escaping (ReaderPosition) -> Void,
         cachedChapter: @escaping (Int) async throws -> String? = { _ in nil },
         online: ReaderOnlineActions? = nil,
+        sourceID: String? = nil,
         bookmarkKey: String? = nil
     ) {
+        self.bookID = bookID
+        self.sourceID = sourceID
         self.title = title
         self.author = author
         self.chapters = chapters
@@ -163,6 +170,7 @@ struct ReaderView: View {
             .task(id: request) {
                 await openChapter(for: request, startingAt: offset)
             }
+            .task { await imageGallery.load() }
             .task(id: refresh) {
                 if let refresh { await refreshChapter(for: refresh) }
             }
@@ -189,6 +197,7 @@ struct ReaderView: View {
             }
             .onChange(of: replacementData) { _, _ in applyReplacements() }
             .onChange(of: effectiveScript) { _, _ in applyReplacements() }
+            .onChange(of: inlineImages(in: chapterIndex)) { _, _ in applyReplacements() }
             .onChange(of: layout.turnMode) { _, _ in finishAutomaticScroll() }
             .onChange(of: theme) { _, newTheme in
                 if newTheme != .night { lastLightTheme = newTheme }
@@ -306,9 +315,12 @@ struct ReaderView: View {
         case .webSearch:
             ReaderWebSearchSheet(query: selectedTextForTool)
         case .askAI:
-            ReaderAISheet(kind: .question, excerpt: selectedTextForTool)
+            ReaderAskAIPanel(
+                bookID: bookID, bookTitle: titleScript.convert(title), author: author,
+                sourceName: online?.sourceName, chapterTitle: chapterTitle, excerpt: selectedTextForTool
+            )
         case .generateImage:
-            ReaderAISheet(kind: .image, excerpt: selectedTextForTool)
+            if let selectedImageContext { ReaderImageGenerationView(context: selectedImageContext) }
         case .replace:
             ReaderReplaceSheet(rules: Binding(
                 get: { ReaderReplacementRule.decode(replacementData) },
@@ -348,6 +360,7 @@ struct ReaderView: View {
                     let request = scrollRequest
                     ReaderTextPane(
                         text: content.transform.text,
+                        images: content.transform.images,
                         typography: ReaderTypography(
                             fontSize: layout.fontSize * textScale,
                             lineSpacing: layout.lineSpacing * textScale,
@@ -718,7 +731,19 @@ struct ReaderView: View {
         case .searchBook: present(.search)
         case .searchWeb: present(.webSearch)
         case .askAI: present(.askAI)
-        case .generateImage: present(.generateImage)
+        case .generateImage:
+            let original = content.text as NSString
+            let selectedEnd = content.transform.originalOffset(forDisplay: max(NSMaxRange(selection.range) - 1, 0))
+            let paragraph = original.paragraphRange(for: NSRange(
+                location: min(selectedEnd, max(0, original.length - 1)), length: 0
+            ))
+            selectedImageContext = ReaderImageContext(
+                bookID: bookID, bookTitle: titleScript.convert(title), author: author,
+                chapterIndex: content.index, chapterTitle: chapterTitle, sourceText: selection.text,
+                originalOffset: NSMaxRange(paragraph), sourceID: sourceID,
+                paragraphText: String(original.substring(with: paragraph).prefix(1200))
+            )
+            present(.generateImage)
         case .readAloud:
             speech.start(text: selection.text, utf16Offset: 0)
         case .bookmark:
@@ -879,17 +904,25 @@ struct ReaderView: View {
             text: text,
             textLength: textLength,
             transform: ReaderTextTransform(
-                original: text, rules: ReaderReplacementRule.decode(replacementData), script: effectiveScript
+                original: text, rules: ReaderReplacementRule.decode(replacementData), script: effectiveScript,
+                images: inlineImages(in: index)
             )
         )
         saveProgress()
     }
 
     private func applyReplacements() {
-        guard let content else { return }
+        guard let content, content.index == chapterIndex else { return }
         speech.stop()
         finishAutomaticScroll()
         setContent(content.text, at: content.index, offset: offset)
+    }
+
+    private func inlineImages(in chapterIndex: Int) -> [ReaderInlineImage] {
+        imageGallery.insertedImages(bookID: bookID, chapterIndex: chapterIndex).compactMap { entry in
+            guard entry.context.sourceID == sourceID, let offset = entry.context.originalOffset else { return nil }
+            return ReaderInlineImage(originalOffset: offset, url: imageGallery.fileURL(for: entry))
+        }
     }
 
     private func displayHighlight(in content: ChapterContent) -> NSRange? {
@@ -898,7 +931,7 @@ struct ReaderView: View {
             return nil
         }
         let start = content.transform.displayOffset(forOriginal: highlight.range.location)
-        let end = content.transform.displayOffset(forOriginal: NSMaxRange(highlight.range))
+        let end = content.transform.displayOffset(forOriginal: NSMaxRange(highlight.range), beforeInlineImages: true)
         return end > start ? NSRange(location: start, length: end - start) : nil
     }
 

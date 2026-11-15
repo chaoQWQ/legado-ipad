@@ -1,0 +1,221 @@
+import SwiftUI
+
+struct ReaderAISettingsView: View {
+    @StateObject private var presentation = ReaderAISettingsPresentation()
+    @State private var showsPrompt = false
+
+    var body: some View {
+        Group {
+            if presentation.isLoaded {
+                settingsForm
+            } else if presentation.loadFailed {
+                ContentUnavailableView {
+                    Label("无法读取 AI 设置", systemImage: "lock")
+                } actions: {
+                    Button("重试", action: presentation.reload)
+                }
+            } else {
+                ProgressView()
+            }
+        }
+        .navigationTitle("AI 设置")
+        .onAppear(perform: presentation.reload)
+        .sheet(isPresented: $showsPrompt) {
+            ReaderAIPromptEditor(presentation: presentation)
+        }
+        .readerAISettingsError($presentation.errorMessage)
+    }
+
+    private var settingsForm: some View {
+        let settings = presentation.settings
+        return Form {
+            Section {
+                Toggle("启用 AI", isOn: presentation.binding(\.enabled))
+            }
+            Section("默认模型") {
+                Picker("默认聊天模型", selection: presentation.binding(\.defaultModelID)) {
+                    Text("自动选择").tag(nil as String?)
+                    ForEach(settings.questionChoices) { choice in
+                        Text(choice.title).tag(Optional(choice.id))
+                    }
+                }
+                Picker("正文问 AI 模型", selection: presentation.binding(\.askModelID)) {
+                    Text("使用默认聊天模型").tag(nil as String?)
+                    ForEach(settings.questionChoices) { choice in
+                        Text(choice.title).tag(Optional(choice.id))
+                    }
+                }
+                Picker("图像生成提供商", selection: presentation.binding(\.imageProviderID)) {
+                    Text("自动选择").tag(nil as String?)
+                    ForEach(settings.enabledImageProviders) { provider in
+                        Text(provider.title).tag(Optional(provider.id))
+                    }
+                }
+            }
+            Section("提供商") {
+                NavigationLink {
+                    ReaderAIProviderList(presentation: presentation)
+                } label: {
+                    LabeledContent("管理提供商", value: "\(settings.providers.count)")
+                }
+                NavigationLink {
+                    ReaderAIImageProviderList(presentation: presentation)
+                } label: {
+                    LabeledContent("图像生成提供商管理", value: "\(settings.imageProviders.count)")
+                }
+            }
+            Section {
+                Button {
+                    showsPrompt = true
+                } label: {
+                    LabeledContent(
+                        "正文问 AI 提示词",
+                        value: settings.askPrompt.isEmpty || settings.askPrompt == ReaderAISettings.defaultAskPrompt ? "默认" : "自定义"
+                    )
+                        .foregroundStyle(.primary)
+                }
+                NavigationLink("图像图库") { ReaderImageGalleryView() }
+            }
+        }
+    }
+}
+
+@MainActor
+final class ReaderAISettingsPresentation: ObservableObject {
+    @Published private(set) var settings = ReaderAISettings()
+    @Published private(set) var isLoaded = false
+    @Published private(set) var loadFailed = false
+    @Published var errorMessage: String?
+
+    func reload() {
+        do {
+            settings = try ReaderAISettings.load()
+            isLoaded = true
+            loadFailed = false
+        } catch {
+            isLoaded = false
+            loadFailed = true
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func update(_ change: (inout ReaderAISettings) -> Void) throws {
+        var updated = try ReaderAISettings.load()
+        change(&updated)
+        try updated.save()
+        settings = updated
+    }
+
+    func perform(_ change: (inout ReaderAISettings) -> Void) {
+        do {
+            try update(change)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func binding<Value>(_ keyPath: WritableKeyPath<ReaderAISettings, Value>) -> Binding<Value> {
+        Binding {
+            self.settings[keyPath: keyPath]
+        } set: { value in
+            self.perform { $0[keyPath: keyPath] = value }
+        }
+    }
+}
+
+struct ReaderAISettingsConnectionFields: View {
+    @Binding var name: String
+    @Binding var address: String
+    @Binding var key: String
+
+    var body: some View {
+        Section("连接") {
+            TextField("提供商名称", text: $name)
+            TextField("接口地址", text: $address, prompt: Text("https://api.openai.com/v1"))
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .keyboardType(.URL)
+            SecureField("API 密钥", text: $key)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+        }
+    }
+}
+
+struct ReaderAISettingsHeadersField: View {
+    @Binding var headers: String
+
+    var body: some View {
+        Section {
+            TextField("自定义请求头", text: $headers, axis: .vertical)
+                .font(.system(.body, design: .monospaced))
+                .lineLimit(3...8)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+        } header: {
+            Text("自定义请求头")
+        } footer: {
+            Text("支持 JSON 对象，或每行填写一个「名称: 值」。")
+        }
+    }
+}
+
+private struct ReaderAIPromptEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var prompt: String
+    @State private var errorMessage: String?
+    let presentation: ReaderAISettingsPresentation
+
+    init(presentation: ReaderAISettingsPresentation) {
+        self.presentation = presentation
+        _prompt = State(initialValue: presentation.settings.askPrompt)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField(
+                        "提示词", text: $prompt,
+                        prompt: Text(ReaderAISettings.defaultAskPrompt),
+                        axis: .vertical
+                    )
+                        .lineLimit(6...20)
+                } footer: {
+                    Text("留空使用内置提示词。")
+                }
+            }
+            .navigationTitle("正文问 AI 提示词")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") {
+                        do {
+                            try presentation.update { $0.askPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines) }
+                            dismiss()
+                        } catch {
+                            errorMessage = error.localizedDescription
+                        }
+                    }
+                }
+            }
+            .readerAISettingsError($errorMessage)
+        }
+    }
+}
+
+extension View {
+    func readerAISettingsError(_ message: Binding<String?>) -> some View {
+        alert("AI 设置", isPresented: Binding(
+            get: { message.wrappedValue != nil },
+            set: { if !$0 { message.wrappedValue = nil } }
+        )) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(message.wrappedValue ?? "")
+        }
+    }
+}
