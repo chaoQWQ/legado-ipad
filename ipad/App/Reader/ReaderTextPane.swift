@@ -4,6 +4,7 @@ struct ReaderScrollRequest: Equatable {
     enum Target: Equatable {
         case offset(Int)
         case reveal(Int)
+        case page(ReaderPageDirection)
     }
 
     let id = UUID()
@@ -22,15 +23,20 @@ struct ReaderTextPane: UIViewRepresentable {
     let automaticSpeed: Double?
     let onScroll: (Int) -> Void
     let onAutomaticEnd: () -> Void
+    var pageMode: ReaderPageMode = .scroll
+    var pageAnimationDuration = 0.3
+    var onChapterTurn: (ReaderPageDirection) -> Void = { _ in }
+    var interaction = ReaderInteractionPreferences()
+    var onToggleControls: () -> Void = {}
+    var onUserPageTurn: () -> Void = {}
 
-    func makeUIView(context: Context) -> ReadingTextView {
-        let view = ReadingTextView(usingTextLayoutManager: false)
+    func makeUIView(context: Context) -> ReaderPagingViewport {
+        let viewport = ReaderPagingViewport()
+        let view = viewport.textView
         view.isEditable = false
-        view.isSelectable = true
         view.backgroundColor = .clear
         view.alwaysBounceVertical = false
         view.contentInsetAdjustmentBehavior = .never
-        view.textContainerInset = UIEdgeInsets(top: 14, left: 24, bottom: 28, right: 24)
         view.textContainer.lineFragmentPadding = 0
         view.delegate = context.coordinator
         view.onReveal = { [weak coordinator = context.coordinator] offset in
@@ -39,20 +45,38 @@ struct ReaderTextPane: UIViewRepresentable {
         view.onAutomaticEnd = { [weak view, weak coordinator = context.coordinator] in
             if let view { coordinator?.report(view.anchorOffset, automaticEnd: true) }
         }
-        view.replace(text, typography: typography, at: initialOffset)
+        viewport.onPageOffset = { [weak coordinator = context.coordinator] offset in
+            coordinator?.report(offset)
+        }
+        viewport.onChapterTurn = { [weak coordinator = context.coordinator] direction in
+            DispatchQueue.main.async { coordinator?.onChapterTurn(direction) }
+        }
+        viewport.onToggleControls = { [weak coordinator = context.coordinator] in
+            coordinator?.onToggleControls()
+        }
+        viewport.onUserPageTurn = { [weak coordinator = context.coordinator] in
+            coordinator?.onUserPageTurn()
+        }
+        viewport.configure(mode: pageMode, animationDuration: pageAnimationDuration, interaction: interaction)
+        viewport.replace(text, typography: typography, at: initialOffset)
         context.coordinator.text = text
         context.coordinator.typography = typography
-        return view
+        return viewport
     }
 
-    func updateUIView(_ view: ReadingTextView, context: Context) {
+    func updateUIView(_ viewport: ReaderPagingViewport, context: Context) {
+        let view = viewport.textView
         let coordinator = context.coordinator
         coordinator.onScroll = onScroll
         coordinator.onAutomaticEnd = onAutomaticEnd
+        coordinator.onChapterTurn = onChapterTurn
+        coordinator.onToggleControls = onToggleControls
+        coordinator.onUserPageTurn = onUserPageTurn
+        viewport.configure(mode: pageMode, animationDuration: pageAnimationDuration, interaction: interaction)
         let textChanged = coordinator.text != text
         let typographyChanged = coordinator.typography != typography
         if textChanged || typographyChanged {
-            view.replace(text, typography: typography, at: textChanged ? initialOffset : view.anchorOffset)
+            viewport.replace(text, typography: typography, at: textChanged ? initialOffset : view.anchorOffset)
             coordinator.text = text
             coordinator.typography = typography
         }
@@ -63,13 +87,14 @@ struct ReaderTextPane: UIViewRepresentable {
         if let request, coordinator.request != request {
             coordinator.request = request
             if case .offset = request.target { coordinator.discardPendingScroll() }
-            view.seek(to: request.target)
+            viewport.seek(to: request.target)
         }
-        view.setAutomaticSpeed(automaticSpeed)
+        view.setAutomaticSpeed(pageMode == .scroll ? automaticSpeed : nil)
     }
 
-    static func dismantleUIView(_ view: ReadingTextView, coordinator: Coordinator) {
-        view.setAutomaticSpeed(nil)
+    static func dismantleUIView(_ viewport: ReaderPagingViewport, coordinator: Coordinator) {
+        viewport.cancelAnimation()
+        viewport.textView.setAutomaticSpeed(nil)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -83,6 +108,9 @@ struct ReaderTextPane: UIViewRepresentable {
         var highlight: NSRange?
         var onScroll: (Int) -> Void
         var onAutomaticEnd: () -> Void
+        var onChapterTurn: (ReaderPageDirection) -> Void = { _ in }
+        var onToggleControls: () -> Void = {}
+        var onUserPageTurn: () -> Void = {}
         private var lastOffset: Int?
         private var pendingOffset: Int?
         private var pendingEnd = false
@@ -138,38 +166,55 @@ final class ReadingTextView: UITextView {
     private var displayLink: CADisplayLink?
     private var automaticSpeed: Double?
     private var highlight: NSRange?
+    private var showsDiscretePages = false
+    private var pageOriginY: CGFloat?
     private var maximumScroll: CGFloat { max(0, contentSize.height - bounds.height) }
 
     func replace(_ text: String, typography: ReaderTypography, at offset: Int) {
         anchorOffset = offset
-        pendingTarget = .offset(offset)
+        pendingTarget = showsDiscretePages ? nil : .offset(offset)
+        pageOriginY = nil
 
         let fontSize = CGFloat(typography.fontSize)
-        let systemFont = UIFont.systemFont(ofSize: fontSize)
+        let weight = fontWeight(for: typography.fontWeight)
+        let systemFont = UIFont.systemFont(ofSize: fontSize, weight: weight)
         let font: UIFont
         switch typography.font {
         case .serif:
             let serif = systemFont.fontDescriptor.withDesign(.serif)
                 .map { UIFont(descriptor: $0, size: fontSize) }
-            font = UIFont(name: "SongtiSC-Regular", size: fontSize) ?? serif ?? systemFont
+            let name = typography.fontWeight >= 750 ? "Black" :
+                typography.fontWeight >= 550 ? "Bold" : typography.fontWeight < 350 ? "Light" : "Regular"
+            font = UIFont(name: "SongtiSC-\(name)", size: fontSize) ?? serif ?? systemFont
         case .sansSerif:
             font = systemFont
+        case .kai:
+            let name = typography.fontWeight >= 550 ? "KaitiSC-Bold" : "KaitiSC-Regular"
+            font = UIFont(name: name, size: fontSize) ?? systemFont
+        case .monospaced:
+            font = .monospacedSystemFont(ofSize: fontSize, weight: weight)
         }
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byWordWrapping
         paragraph.lineSpacing = typography.lineSpacing
         paragraph.paragraphSpacing = typography.paragraphSpacing
+        paragraph.alignment = typography.justifiesText ? .justified : .natural
+        textContainerInset = UIEdgeInsets(
+            top: typography.topMargin, left: typography.leadingMargin,
+            bottom: typography.bottomMargin, right: typography.trailingMargin
+        )
         tintColor = UIColor(typography.palette.accent)
         indicatorStyle = typography.palette == .night ? .white : .black
         let formatted = NSMutableAttributedString(string: text, attributes: [
             .font: font,
+            .kern: typography.letterSpacing,
             .foregroundColor: UIColor(typography.palette.foreground),
             .paragraphStyle: paragraph
         ])
-        if typography.indentParagraphs {
+        if typography.indentWidth > 0 {
             let indented = NSMutableParagraphStyle()
             indented.setParagraphStyle(paragraph)
-            indented.firstLineHeadIndent = fontSize * 2
+            indented.firstLineHeadIndent = fontSize * typography.indentWidth
             text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: [.byParagraphs, .substringNotRequired]) {
                 _, range, enclosingRange, _ in
                 guard let first = text[range].first, !first.isWhitespace else { return }
@@ -179,6 +224,36 @@ final class ReadingTextView: UITextView {
         highlight = nil
         attributedText = formatted
         setNeedsLayout()
+    }
+
+    private func fontWeight(for value: Double) -> UIFont.Weight {
+        let weights: [UIFont.Weight] = [.ultraLight, .thin, .light, .regular, .medium, .semibold, .bold, .heavy, .black]
+        let position = (min(900, max(100, value)) - 100) / 100
+        let index = Int(position)
+        guard index < weights.count - 1 else { return .black }
+        let lower = weights[index].rawValue
+        let upper = weights[index + 1].rawValue
+        return UIFont.Weight(rawValue: lower + (upper - lower) * (position - Double(index)))
+    }
+
+    func setDiscretePages(_ enabled: Bool) {
+        showsDiscretePages = enabled
+        if enabled { pendingTarget = nil }
+        else { pageOriginY = nil }
+    }
+
+    func showPage(at y: CGFloat) {
+        pageOriginY = y
+        setContentOffset(CGPoint(x: 0, y: y), animated: false)
+        alignPageOrigin()
+    }
+
+    private func alignPageOrigin() {
+        // TextKit can already know the page's exact line position while
+        // UITextView is still scrolling against an earlier layout estimate.
+        if let pageOriginY, abs(bounds.origin.y - pageOriginY) > 0.5 {
+            bounds.origin.y = pageOriginY
+        }
     }
 
     func updateHighlight(_ range: NSRange?, palette: ReadingPalette) {
@@ -208,7 +283,7 @@ final class ReadingTextView: UITextView {
     }
 
     var readingOffsetAfterScroll: Int? {
-        guard let offset = firstVisibleOffset else { return nil }
+        guard !showsDiscretePages, let offset = firstVisibleOffset else { return nil }
         // UITextView can report a partial contentSize while TextKit lays out
         // the chapter. Verify the real end before saving the 100% position.
         if contentOffset.y > 0, contentOffset.y >= maximumScroll - 1,
@@ -232,12 +307,16 @@ final class ReadingTextView: UITextView {
 
     override func layoutSubviews() {
         let resized = lastLayoutSize != bounds.size
-        if resized && lastLayoutSize != .zero && pendingTarget == nil {
+        if !showsDiscretePages && resized && lastLayoutSize != .zero && pendingTarget == nil {
             pendingTarget = .offset(anchorOffset)
         }
         super.layoutSubviews()
 
         lastLayoutSize = bounds.size
+        if showsDiscretePages {
+            alignPageOrigin()
+            return
+        }
         guard let target = pendingTarget, bounds.width > 0, bounds.height > 0,
               textStorage.length > 0 else { return }
         let y: CGFloat
@@ -264,6 +343,9 @@ final class ReadingTextView: UITextView {
                 return
             }
             y = min(line.minY, maximumScroll)
+        case .page:
+            pendingTarget = nil
+            return
         }
         setContentOffset(CGPoint(x: 0, y: y), animated: false)
         pendingTarget = nil
@@ -280,6 +362,18 @@ final class ReadingTextView: UITextView {
             layoutManager.extraLineFragmentRect.maxY
         )
         return max(0, ceil(textBottom + textContainerInset.top + textContainerInset.bottom) - bounds.height)
+    }
+
+    func turnViewport(_ direction: ReaderPageDirection, animated: Bool) -> Bool {
+        let y = max(0, contentOffset.y)
+        let distance = max(1, bounds.height - textContainerInset.top - textContainerInset.bottom) * 0.88
+        var target = max(0, y + (direction == .next ? distance : -distance))
+        if direction == .next, target >= maximumScroll - 1 {
+            target = min(target, laidOutMaximumScroll())
+        }
+        guard abs(target - y) > 0.5 else { return false }
+        setContentOffset(CGPoint(x: 0, y: target), animated: animated && !UIAccessibility.isReduceMotionEnabled)
+        return true
     }
 
     func setAutomaticSpeed(_ speed: Double?) {
@@ -336,6 +430,12 @@ struct ReaderTextPane: View {
     let automaticSpeed: Double?
     let onScroll: (Int) -> Void
     let onAutomaticEnd: () -> Void
+    var pageMode: ReaderPageMode = .scroll
+    var pageAnimationDuration = 0.3
+    var onChapterTurn: (ReaderPageDirection) -> Void = { _ in }
+    var interaction = ReaderInteractionPreferences()
+    var onToggleControls: () -> Void = {}
+    var onUserPageTurn: () -> Void = {}
 
     var body: some View {
         ScrollView {

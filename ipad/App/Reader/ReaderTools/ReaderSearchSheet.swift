@@ -15,7 +15,10 @@ struct ReaderSearchMatch: Identifiable {
 
     var id: ID { ID(chapterIndex: chapterIndex, utf16Offset: utf16Offset) }
 
-    static func matches(in text: String, chapterIndex: Int, query: String, limit: Int) -> [Self] {
+    static func matches(
+        in text: String, chapterIndex: Int, query: String, limit: Int,
+        originalOffset: (Int) -> Int = { $0 }
+    ) -> [Self] {
         guard !query.isEmpty, limit > 0 else { return [] }
         let body = text as NSString
         var cursor = 0
@@ -39,8 +42,10 @@ struct ReaderSearchMatch: Identifiable {
             let after = body.substring(with: NSRange(
                 location: end, length: NSMaxRange(context) - end
             ))
+            let start = originalOffset(range.location)
+            let length = max(1, originalOffset(end) - start)
             results.append(Self(
-                chapterIndex: chapterIndex, utf16Offset: range.location, utf16Length: range.length,
+                chapterIndex: chapterIndex, utf16Offset: start, utf16Length: length,
                 before: (context.location > 0 ? "…" : "") + singleLine(before),
                 highlighted: singleLine(body.substring(with: range)),
                 after: singleLine(after) + (NSMaxRange(context) < body.length ? "…" : "")
@@ -59,6 +64,8 @@ struct ReaderSearchSheet: View {
     let chapters: [ReaderChapter]
     let loadChapter: (Int) async throws -> String?
     let jumpTo: (ReaderSearchMatch) -> Void
+    var script: ReaderScript = .off
+    var queryScript: ReaderScript = .off
 
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
@@ -144,7 +151,7 @@ struct ReaderSearchSheet: View {
 
     private func matchRow(_ match: ReaderSearchMatch) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(chapters[match.chapterIndex].title)
+            Text(queryScript.convert(chapters[match.chapterIndex].title))
                 .font(.subheadline.weight(.semibold))
             (Text(match.before) + Text(match.highlighted).bold().foregroundColor(.accentColor) + Text(match.after))
                 .font(.footnote)
@@ -158,7 +165,7 @@ struct ReaderSearchSheet: View {
     @MainActor
     private func search(_ input: String) async {
         guard !Task.isCancelled else { return }
-        let term = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let term = queryScript.convert(input.trimmingCharacters(in: .whitespacesAndNewlines))
         results = []
         progress = 0
         unavailable = 0
@@ -176,8 +183,10 @@ struct ReaderSearchSheet: View {
             guard !Task.isCancelled, input == query else { return }
             if let chapter {
                 let remaining = resultLimit - results.count
+                let conversion = ReaderTextTransform(original: chapter, rules: [], script: script)
                 let matches = ReaderSearchMatch.matches(
-                    in: chapter, chapterIndex: index, query: term, limit: remaining + 1
+                    in: conversion.text, chapterIndex: index, query: term, limit: remaining + 1,
+                    originalOffset: conversion.originalOffset(forDisplay:)
                 )
                 results.append(contentsOf: matches.prefix(remaining))
                 hasMoreResults = matches.count > remaining

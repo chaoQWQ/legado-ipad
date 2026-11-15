@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ReaderOnlineActions {
     let sourceName: String
+    let simplifiesText: Bool
     let refreshChapter: (Int) async throws -> String
     let download: (Int) -> AnyView
     let changeSource: (Int) -> AnyView
@@ -52,6 +53,7 @@ struct LibraryReadingSession: View {
         guard book.sourceID != nil else { return nil }
         return ReaderOnlineActions(
             sourceName: library.sourceName(for: book),
+            simplifiesText: library.sourceSimplifiesText(for: book),
             refreshChapter: { try await library.refreshChapter(in: book, at: $0) },
             download: { index in
                 AnyView(ChapterDownloadView(library: library, book: book, startIndex: index))

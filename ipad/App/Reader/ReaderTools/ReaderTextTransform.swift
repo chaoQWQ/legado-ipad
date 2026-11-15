@@ -30,10 +30,14 @@ struct ReaderTextTransform {
     private let originalLength: Int
     private let steps: [[Edit]]
 
-    init(original: String, rules: [ReaderReplacementRule]) {
+    init(original: String, rules: [ReaderReplacementRule], script: ReaderScript = .off) {
         let length = original.utf16.count
-        var display = original
+        var display = script.convert(original)
         var stages: [[Edit]] = []
+        if script != .off, original != display {
+            let scriptEdits = Self.scriptEdits(from: original, to: display)
+            if !scriptEdits.isEmpty { stages.append(scriptEdits) }
+        }
 
         for rule in rules where rule.isEnabled && !rule.find.isEmpty && rule.find != rule.replacement {
             let source = display as NSString
@@ -75,6 +79,46 @@ struct ReaderTextTransform {
         text = display
         originalLength = length
         steps = stages
+    }
+
+    private static func scriptEdits(from original: String, to display: String) -> [Edit] {
+        // The system conversion keeps line separators. Track UTF-16 widths
+        // inside each line, since some Han glyphs map to supplementary scalars.
+        let sourceLines = original.split(separator: "\n", omittingEmptySubsequences: false)
+        let targetLines = display.split(separator: "\n", omittingEmptySubsequences: false)
+        guard sourceLines.count == targetLines.count else {
+            return [Edit(source: NSRange(location: 0, length: original.utf16.count),
+                         destination: NSRange(location: 0, length: display.utf16.count))]
+        }
+        var sourceStart = 0
+        var targetStart = 0
+        var edits: [Edit] = []
+        for (source, target) in zip(sourceLines, targetLines) {
+            let sourceLength = source.utf16.count
+            let targetLength = target.utf16.count
+            if source != target {
+                if source.unicodeScalars.count == target.unicodeScalars.count {
+                    var sourceOffset = sourceStart
+                    var targetOffset = targetStart
+                    for (from, to) in zip(source.unicodeScalars, target.unicodeScalars) {
+                        let fromWidth = from.value <= 0xFFFF ? 1 : 2
+                        let toWidth = to.value <= 0xFFFF ? 1 : 2
+                        if fromWidth != toWidth {
+                            edits.append(Edit(source: NSRange(location: sourceOffset, length: fromWidth),
+                                              destination: NSRange(location: targetOffset, length: toWidth)))
+                        }
+                        sourceOffset += fromWidth
+                        targetOffset += toWidth
+                    }
+                } else {
+                    edits.append(Edit(source: NSRange(location: sourceStart, length: sourceLength),
+                                      destination: NSRange(location: targetStart, length: targetLength)))
+                }
+            }
+            sourceStart += sourceLength + 1
+            targetStart += targetLength + 1
+        }
+        return edits
     }
 
     func displayOffset(forOriginal offset: Int) -> Int {

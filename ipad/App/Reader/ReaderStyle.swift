@@ -80,9 +80,11 @@ enum ReadingPalette {
     }
 }
 
-enum ReaderFont: String, CaseIterable, Identifiable {
+enum ReaderFont: String, CaseIterable, Identifiable, Codable {
     case serif
     case sansSerif
+    case kai
+    case monospaced
 
     var id: Self { self }
 
@@ -90,6 +92,8 @@ enum ReaderFont: String, CaseIterable, Identifiable {
         switch self {
         case .serif: "宋体"
         case .sansSerif: "无衬线"
+        case .kai: "楷体"
+        case .monospaced: "等宽"
         }
     }
 }
@@ -100,10 +104,17 @@ struct ReaderTypography: Equatable {
     let font: ReaderFont
     let palette: ReadingPalette
     var paragraphSpacing: Double = 8
-    var indentParagraphs = false
+    var letterSpacing: Double = 0
+    var fontWeight: Double = 400
+    var indentWidth: Double = 0
+    var leadingMargin: Double = 24
+    var trailingMargin: Double = 24
+    var topMargin: Double = 14
+    var bottomMargin: Double = 28
+    var justifiesText = false
 }
 
-enum ReaderColumnWidth: String, CaseIterable, Identifiable {
+enum ReaderColumnWidth: String, CaseIterable, Identifiable, Codable {
     case narrow
     case standard
     case wide
@@ -125,73 +136,179 @@ enum ReaderColumnWidth: String, CaseIterable, Identifiable {
     }
 }
 
-struct ReaderSettingsView: View {
-    enum SectionKind { case appearance, layout }
+struct ReaderLayoutPreferences: Codable, Equatable {
+    var font: ReaderFont = .serif
+    var fontSize: Double = 23
+    var letterSpacing: Double = 0
+    var lineSpacing: Double = 8
+    var paragraphSpacing: Double = 8
+    var fontWeight: Double = 400
+    var indentWidth: Double = 0
+    var columnWidth: ReaderColumnWidth = .standard
+    var leadingMargin: Double = 24
+    var trailingMargin: Double = 24
+    var topMargin: Double = 14
+    var bottomMargin: Double = 28
+    var turnMode: ReaderPageMode = .scroll
+    var turnSpeed: ReaderPageSpeed = .standard
 
-    @Environment(\.dismiss) private var dismiss
-    let kind: SectionKind
-    @Binding var theme: ReaderTheme
-    @Binding var font: ReaderFont
-    @Binding var fontSize: Double
-    @Binding var lineSpacing: Double
-    @Binding var paragraphSpacing: Double
-    @Binding var indentParagraphs: Bool
-    @Binding var columnWidth: ReaderColumnWidth
-    @Binding var automaticSpeed: Double
+    static func legacy(from defaults: UserDefaults) -> Self {
+        var layout = Self()
+        layout.font = defaults.string(forKey: "reader.font").flatMap(ReaderFont.init(rawValue:)) ?? layout.font
+        layout.fontSize = defaults.object(forKey: "reader.fontSize") as? Double ?? layout.fontSize
+        layout.lineSpacing = defaults.object(forKey: "reader.lineSpacing") as? Double ?? layout.lineSpacing
+        layout.paragraphSpacing = defaults.object(forKey: "reader.paragraphSpacing") as? Double ?? layout.paragraphSpacing
+        layout.indentWidth = defaults.bool(forKey: "reader.indentParagraphs") ? 2 : 0
+        layout.columnWidth = defaults.string(forKey: "reader.columnWidth").flatMap(ReaderColumnWidth.init(rawValue:)) ?? layout.columnWidth
+        return layout
+    }
+}
 
-    var body: some View {
-        NavigationStack {
-            Form {
-                if kind == .appearance {
-                    Section("主题") {
-                        Picker("主题", selection: $theme) {
-                            ForEach(ReaderTheme.allCases) { theme in
-                                Text(theme.title).tag(theme)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                    }
-                    Section("正文") {
-                        Picker("字体", selection: $font) {
-                            ForEach(ReaderFont.allCases) { font in
-                                Text(font.title).tag(font)
-                            }
-                        }
+struct ReaderLayoutProfiles: Codable, Equatable {
+    var isShared = true
+    var shared: ReaderLayoutPreferences
+    var perTheme: [String: ReaderLayoutPreferences] = [:]
 
-                        numberSlider("字号", value: $fontSize, range: 14...42)
-                        Picker("正文宽度", selection: $columnWidth) {
-                            ForEach(ReaderColumnWidth.allCases) { width in
-                                Text(width.title).tag(width)
-                            }
-                        }
-                    }
-                } else {
-                    Section("排版") {
-                        numberSlider("行距", value: $lineSpacing, range: 0...20)
-                        numberSlider("段距", value: $paragraphSpacing, range: 0...32)
-                        Toggle("首行缩进", isOn: $indentParagraphs)
-                    }
-                    Section("自动滚动") {
-                        numberSlider("滚动速度", value: $automaticSpeed, range: 12...110)
-                    }
-                }
-            }
-            .navigationTitle(kind == .appearance ? "阅读界面" : "阅读设置")
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") { dismiss() }
-                }
-            }
+    subscript(theme: ReaderTheme) -> ReaderLayoutPreferences {
+        get { isShared ? shared : perTheme[theme.rawValue] ?? shared }
+        set {
+            if isShared { shared = newValue }
+            else { perTheme[theme.rawValue] = newValue }
+        }
+    }
+}
+
+enum ReaderPageSpeed: String, CaseIterable, Identifiable, Codable {
+    case fast, standard, gentle, slow
+    var id: Self { self }
+    var title: String {
+        switch self {
+        case .fast: "极速"
+        case .standard: "标准"
+        case .gentle: "舒缓"
+        case .slow: "优雅"
+        }
+    }
+    var duration: Double {
+        switch self {
+        case .fast: 0.18
+        case .standard: 0.30
+        case .gentle: 0.42
+        case .slow: 0.56
+        }
+    }
+}
+
+enum ReaderScript: String, CaseIterable, Identifiable, Codable {
+    case off, simplified, traditional
+    var id: Self { self }
+    var title: String {
+        switch self {
+        case .off: "关闭"
+        case .simplified: "简体"
+        case .traditional: "繁体"
         }
     }
 
-    private func numberSlider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            LabeledContent(title, value: value.wrappedValue.formatted())
-            Slider(value: value, in: range, step: 1) {
-                Text(title)
-            }
-        }
-        .padding(.vertical, 6)
+    func convert(_ text: String) -> String {
+        guard self != .off else { return text }
+        return text.applyingTransform(StringTransform("Traditional-Simplified"), reverse: self == .traditional) ?? text
     }
+}
+
+enum ReaderTitleAlignment: String, CaseIterable, Identifiable, Codable {
+    case left, center, hidden
+    var id: Self { self }
+    var title: String {
+        switch self {
+        case .left: "左对齐"
+        case .center: "居中"
+        case .hidden: "隐藏"
+        }
+    }
+}
+
+struct ReaderInformationPreferences: Codable, Equatable {
+    var showsChapterInfo = true
+    var showsReadingProgress = false
+    var showsClock = false
+    var titleAlignment: ReaderTitleAlignment = .left
+}
+
+enum ReaderOrientation: String, CaseIterable, Identifiable, Codable {
+    case system, portrait, landscape
+    var id: Self { self }
+    var title: String {
+        switch self {
+        case .system: "跟随系统"
+        case .portrait: "竖屏"
+        case .landscape: "横屏"
+        }
+    }
+}
+
+enum ReaderScreenTimeout: String, CaseIterable, Identifiable, Codable {
+    case system, oneMinute, fiveMinutes, tenMinutes, always
+    var id: Self { self }
+    var title: String {
+        switch self {
+        case .system: "默认"
+        case .oneMinute: "1 分钟"
+        case .fiveMinutes: "5 分钟"
+        case .tenMinutes: "10 分钟"
+        case .always: "常亮"
+        }
+    }
+    var seconds: TimeInterval? {
+        switch self {
+        case .system, .always: nil
+        case .oneMinute: 60
+        case .fiveMinutes: 300
+        case .tenMinutes: 600
+        }
+    }
+}
+
+enum ReaderProgressBehavior: String, CaseIterable, Identifiable, Codable {
+    case chapter, book
+    var id: Self { self }
+    var title: String { self == .chapter ? "调整章内进度" : "调整章节位置" }
+}
+
+enum ReaderTapAction: String, CaseIterable, Identifiable, Codable {
+    case previousPage, showControls, nextPage, none
+    var id: Self { self }
+    var title: String {
+        switch self {
+        case .previousPage: "上一页"
+        case .showControls: "打开或关闭菜单"
+        case .nextPage: "下一页"
+        case .none: "无操作"
+        }
+    }
+}
+
+struct ReaderBehavior: Codable, Equatable {
+    var orientation: ReaderOrientation = .system
+    var screenTimeout: ReaderScreenTimeout = .system
+    var hidesStatusBar = false
+    var hidesNavigationBar = false
+    var progressBehavior: ReaderProgressBehavior = .chapter
+    var justifiesText = false
+    var allowsTextSelection = true
+    var showsBrightnessControl = false
+    var swipeThreshold: Double = 0
+    var tapPrevious: ReaderTapAction = .previousPage
+    var tapCenter: ReaderTapAction = .showControls
+    var tapNext: ReaderTapAction = .nextPage
+    var menuOpacity: Double = 1
+    var animatesScrollTaps = true
+    var showsChapterAccessory = true
+    var keyboardPageTurns = true
+    var automaticSpeed: Double = 36
+    var automaticPageInterval: Double = 8
+}
+
+func saveReaderPreference<T: Encodable>(_ value: T, into data: inout Data) {
+    if let payload = try? JSONEncoder().encode(value) { data = payload }
 }

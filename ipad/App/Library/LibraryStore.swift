@@ -109,6 +109,10 @@ final class LibraryStore: ObservableObject {
         sources.first { $0.id == book.sourceID }?.name ?? book.sourceID.flatMap { URL(string: $0)?.host } ?? "在线书源"
     }
 
+    func sourceSimplifiesText(for book: LibraryBook) -> Bool {
+        sources.first { $0.id == book.sourceID }?.simplifiesChapterText == true
+    }
+
     func hasPosition(for id: UUID) -> Bool {
         storedPosition(for: id) != nil
     }

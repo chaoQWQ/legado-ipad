@@ -262,9 +262,14 @@ func applyReplacement(_ rule: String?, to text: String, applyingTextConversion: 
 }
 
 extension BookSource {
+    public var simplifiesChapterText: Bool {
+        guard let rule = contentRule?.replaceRegex?.nilIfBlank else { return false }
+        return usesSimplifiedChineseConversion(rule)
+    }
+
     /// Applies the recognized native Chinese conversion to previously cached chapter text.
     public func convertCachedContent(_ text: String) -> String {
-        guard let rule = contentRule?.replaceRegex?.nilIfBlank, usesSimplifiedChineseConversion(rule) else { return text }
+        guard simplifiesChapterText else { return text }
         return simplifiedChinese(text)
     }
 }
